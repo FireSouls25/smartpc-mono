@@ -2,7 +2,6 @@
 //! Rendered fresh on every run so the model always reasons with current
 //! facts (focused app, session, input capabilities).
 use super::context::SystemContext;
-use super::tools::catalog;
 
 /// Static half of the prompt: role, rules, capabilities, OS guide.
 /// Rendered once per sidecar boot (the OS/session barely change) and handed
@@ -39,7 +38,7 @@ OS INTERACTION GUIDE ({os}/{session})\n\
 }
 
 /// Dynamic half: fresh machine facts + reply language, prepended to every
-/// user message (pi turns and native runs alike).
+/// user message.
 pub fn turn_context(ctx: &SystemContext, lang: &str) -> String {
     format!(
         "CURRENT MACHINE (fresh facts — earlier turns prove nothing)\n{}\nReply in {}.",
@@ -52,60 +51,10 @@ pub fn turn_context(ctx: &SystemContext, lang: &str) -> String {
 /// The model reads them as a classification task and starts emitting bare
 /// tool names as *text* instead of function calls. Describe capabilities in
 /// plain functional prose; the callable schemas already carry names+types.
-///
-/// Full prompt for the native loop: static half + current machine facts.
-/// Identical content to before the split (wording preserved).
-pub fn system_prompt(ctx: &SystemContext, lang: &str) -> String {
-    format!(
-        "{}\nCURRENT MACHINE\n{}",
-        static_prompt(ctx),
-        turn_context(ctx, lang),
-    )
-}
 
-/// Tool instructions for models WITHOUT native function calling (Zen free
-/// tier): they act by emitting fenced JSON blocks, which the agent loop
-/// parses and executes. Rendered from the live catalog so names/args can
-/// never drift from what `exec` accepts. `*` marks required arguments.
-pub fn text_tool_guide() -> String {
-    let mut out = String::from(
-        "TEXT TOOL MODE (your API has no function calling — follow exactly)\n\
-         You act ONLY by emitting fenced calls. To act, output one or more blocks like this, with short prose at most:\n\
-         ```tool\n\
-         {\"name\": \"<tool>\", \"arguments\": {<args>}}\n\
-         ```\n\
-         One action per block, at most 3 blocks per reply. `arguments` must be a JSON object ({} when the tool takes none). Unknown names are ignored. After tool results arrive, keep going until done, then summarize. Never claim an action without a result. Never emit bare tool names. Prefer the keys \"name\" and \"arguments\".\n\
-         \n\
-         TOOLS\n",
-    );
-    for t in catalog() {
-        let required: Vec<&str> = t
-            .parameters
-            .get("required")
-            .and_then(|r| r.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        let mut args = vec![];
-        if let Some(map) = t.parameters.get("properties").and_then(|p| p.as_object()) {
-            for (k, v) in map {
-                let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("?");
-                let star = if required.iter().any(|r| r == k) {
-                    "*"
-                } else {
-                    ""
-                };
-                args.push(format!("{k}{star}: {ty}"));
-            }
-        }
-        let arglist = if args.is_empty() {
-            "no arguments".to_string()
-        } else {
-            args.join(", ")
-        };
-        out.push_str(&format!("- {}({}): {}\n", t.name, arglist, t.description));
-    }
-    out
-}
+/// Appended to every turn message: earlier turns prove nothing about the
+/// current request — act in THIS turn or not at all.
+pub(crate) const TURN_REMINDER: &str = "[Reminder: earlier turns prove nothing about the current request. If anything must be done on the machine, emit the tool call(s) in THIS turn — never describe an action as done unless a tool result in THIS turn confirms it.]";
 
 fn os_guide(os: &str, session: &str) -> &'static str {
     match (os, session) {
@@ -156,12 +105,10 @@ mod tests {
 
     #[test]
     fn prompt_carries_os_facts_and_guide() {
-        let p = system_prompt(&fake_ctx(), "es");
+        let p = static_prompt(&fake_ctx());
         assert!(p.contains("linux"));
         assert!(p.contains("wayland"));
-        assert!(p.contains("Firefox"));
         assert!(p.contains("Wayland session"));
-        assert!(p.contains("Spanish"));
     }
 
     /// Snapshot helper, not an assertion test: run with
@@ -172,17 +119,15 @@ mod tests {
         let ctx = crate::harness::context::gather();
         println!(
             "=== PROMPT BEGIN ===\n{}\n=== PROMPT END ===",
-            system_prompt(&ctx, "es")
+            static_prompt(&ctx)
         );
-        assert!(!system_prompt(&ctx, "es").is_empty());
+        assert!(!static_prompt(&ctx).is_empty());
     }
 
     #[test]
-    fn text_guide_lists_every_tool() {
-        let g = text_tool_guide();
-        for t in crate::harness::tools::catalog() {
-            assert!(g.contains(t.name), "guide missing {}", t.name);
-        }
-        assert!(g.contains("```tool"));
+    fn turn_context_names_language() {
+        let t = turn_context(&fake_ctx(), "es");
+        assert!(t.contains("Spanish"));
+        assert!(t.contains("Firefox"));
     }
 }

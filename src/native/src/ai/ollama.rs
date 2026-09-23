@@ -3,9 +3,7 @@
 //! Live models come from Ollama's native `/api/tags`.
 use super::{
     openai_compat::{OpenAiCompatClient, OpenAiCompatConfig},
-    provider::{
-        ChatMessage, ChatOptions, ChatResponse, LlmProvider, ProviderError, ToolChatResponse,
-    },
+    provider::{LlmProvider, ProviderError},
 };
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -77,23 +75,6 @@ impl LlmProvider for Ollama {
 
     fn default_model(&self) -> &str {
         &self.model
-    }
-
-    async fn chat(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-    ) -> Result<ChatResponse, ProviderError> {
-        self.client.chat(messages, opts).await
-    }
-
-    async fn chat_with_tools(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-        tools: &[serde_json::Value],
-    ) -> Result<ToolChatResponse, ProviderError> {
-        self.client.chat_with_tools(messages, opts, tools).await
     }
 
     async fn models(&self) -> Result<Vec<String>, ProviderError> {

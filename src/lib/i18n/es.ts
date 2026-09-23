@@ -24,6 +24,7 @@ export const es = {
   "orb.thinking": "Pensando",
   "chat.placeholder": "Pídele algo a tu PC…",
   "chat.send": "Enviar",
+  "chat.stop": "Detener",
   "chat.provider": "Proveedor",
   "chat.model": "Modelo",
   "chat.hello": "Hola, ¿qué hacemos hoy?",
@@ -44,6 +45,8 @@ export const es = {
   "voice.modeWake": "Palabra clave: escucha siempre",
   "voice.modeConvo": "Conversación: habla continua",
   "voice.convoLimit": "Conversación terminada (límite de turnos).",
+  "voice.convoEmpty":
+    "Sin voz detectada; revisa el micrófono o la sensibilidad.",
   "voice.speakFailed":
     "No se pudo reproducir la respuesta; conversación detenida.",
   "voice.wakeWord": "Palabra de activación",
@@ -67,6 +70,12 @@ export const es = {
   "voice.hotkeyHint": "Alterna el micrófono desde cualquier parte.",
   "voice.osGain": "Volumen del SO",
   "voice.muted": "silenciado",
+  "voice.models": "Modelos instalados",
+  "voice.downloaded": "Descargado",
+  "voice.notDownloaded": "No descargado",
+  "voice.deleteModel": "Eliminar",
+  "voice.deleteAsk":
+    "¿Eliminar el modelo {name} (~{size} MB)? Se descargará de nuevo al usarlo.",
   "voice.pressKeys": "Pulsa la combinación…",
   "voice.hotkeyReset": "Restablecer",
   "voice.ready": "Listo",

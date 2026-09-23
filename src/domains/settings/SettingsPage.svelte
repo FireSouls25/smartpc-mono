@@ -26,8 +26,6 @@
     type VoiceStatus,
   } from "../voice/voice.api";
   import SelectMenu from "../../shared/SelectMenu.svelte";
-  import { api } from "../../lib/api";
-
   let {
     onBack,
     initialSection = 0,
@@ -59,36 +57,13 @@
   const items = (): string[] =>
     sections.map((s) => t(`settings.${s}` as I18nKey));
 
-  // In-app diagnostics: the sidecar mirrors its stderr here because
-  // Electron swallows it. Auto-load once when the AI section opens.
-  let diagLines = $state<string[]>([]);
-  let diagLoading = $state(false);
-  let diagLoaded = $state(false);
-  let diagCopied = $state(false);
-
+  // Voice status is live (mic hotplug, session state): refresh on every
+  // entry. Debug output lives in the terminal now (sidecar stderr), not here.
   $effect(() => {
-    if (section === 1 && !diagLoaded) {
-      diagLoaded = true;
-      void loadDiag();
-    }
     if (section === 2) {
-      // Voice status is live (mic hotplug, session state): refresh on every
-      // entry, unlike the append-only diagnostics log.
       void loadVoiceStatus();
     }
   });
-
-  async function loadDiag(): Promise<void> {
-    diagLoading = true;
-    try {
-      const res = await api<{ lines: string[] }>("/v1/support/diagnostics");
-      diagLines = res.lines;
-    } catch {
-      diagLines = [];
-    } finally {
-      diagLoading = false;
-    }
-  }
 
   // Voice status (mic + model readiness). Refreshed on every entry —
   // see the section effect above.
@@ -118,16 +93,6 @@
       out.push({ value: d, label: d });
     }
     return out;
-  }
-
-  async function copyDiag(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(diagLines.join("\n"));
-      diagCopied = true;
-      setTimeout(() => (diagCopied = false), 1500);
-    } catch {
-      // Clipboard unavailable: the text stays visible to copy by hand.
-    }
   }
 
   async function logout(): Promise<void> {
@@ -187,6 +152,36 @@
     };
   }
 
+  /** Installed-model rows (sizes mirror stt/model.rs specs). */
+  function sttCatalog(): { name: string; sizeMb: number; ready: boolean }[] {
+    const sizes: Record<string, number> = {
+      tiny: 75,
+      "tiny.en": 75,
+      base: 142,
+      "base.en": 142,
+      small: 466,
+    };
+    return Object.keys(sizes).map((name) => ({
+      name,
+      sizeMb: sizes[name],
+      ready: voiceStatus?.models_ready?.[name] ?? false,
+    }));
+  }
+
+  let modelsError = $state("");
+
+  async function deleteSttModel(name: string, sizeMb: number): Promise<void> {
+    modelsError = "";
+    const msg = t("voice.deleteAsk", { name, size: String(sizeMb) });
+    if (!window.confirm(msg)) return;
+    try {
+      await voiceApi.deleteSttModel(name);
+      await loadVoiceStatus();
+    } catch (err) {
+      modelsError = err instanceof Error ? err.message : "Error";
+    }
+  }
+
   async function remove(): Promise<void> {
     if (!window.confirm(t("auth.deleteAsk"))) return;
     await auth.deleteAccount();
@@ -228,8 +223,8 @@
     <div class="min-w-0 flex-1">
       {#if section === 0}
         <div class="flex flex-col gap-4">
-          <div>
-            <p class="label">{t("common.theme")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("common.theme")}</h3>
             <div class="flex flex-wrap gap-2">
               {#each ["auto", "light", "dark"] as Theme[] as v (v)}
                 <button
@@ -249,8 +244,8 @@
               {/each}
             </div>
           </div>
-          <div>
-            <p class="label">Language / Idioma</p>
+          <div class="group-card">
+            <h3 class="group-title">Language / Idioma</h3>
             <div class="flex flex-wrap gap-2">
               {#each ["es", "en"] as Lang[] as v (v)}
                 <button
@@ -273,8 +268,8 @@
           {#if providers.providersError}
             <p class="error-box">{providers.providersError}</p>
           {/if}
-          <div>
-            <p class="label">{t("chat.provider")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("chat.provider")}</h3>
             <SelectMenu
               label={t("chat.provider")}
               value={providers.activeProvider}
@@ -288,8 +283,8 @@
               onChange={(v) => void providers.selectProvider(v)}
             />
           </div>
-          <div>
-            <p class="label">{t("chat.model")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("chat.model")}</h3>
             <SelectMenu
               label={t("chat.model")}
               value={providers.activeModel}
@@ -324,40 +319,12 @@
               </button>
             </div>
           {/each}
-          <div class="mt-2 border-t pt-4" style="border-color: var(--border);">
-            <p class="label">{t("settings.diagnostics")}</p>
-            <p class="muted mb-2 text-xs">{t("settings.diagnosticsHint")}</p>
-            <div class="mb-2 flex flex-wrap gap-2">
-              <button
-                class="btn btn-ghost"
-                style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
-                onclick={() => void loadDiag()}
-                disabled={diagLoading}
-              >
-                {t("settings.diagReload")}
-              </button>
-              <button
-                class="btn btn-ghost"
-                style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
-                onclick={() => void copyDiag()}
-                disabled={diagLines.length === 0}
-              >
-                {diagCopied ? t("settings.diagCopied") : t("settings.diagCopy")}
-              </button>
-            </div>
-            <pre
-              class="font-mono text-xs whitespace-pre-wrap break-all"
-              style="max-height: 16rem; overflow: auto; border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.5rem 0.75rem; background: var(--card);">{diagLines.length >
-              0
-                ? diagLines.join("\n")
-                : t("settings.diagEmpty")}</pre>
-          </div>
         </div>
       {:else if section === 2}
         <div class="flex flex-col gap-4">
           <p class="muted text-sm">{t("voice.localNote")}</p>
-          <div>
-            <p class="label">{t("voice.input")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.input")}</h3>
             <SelectMenu
               label={t("voice.input")}
               value={voice.device ?? ""}
@@ -371,9 +338,49 @@
             {#if voiceStatus?.device}
               <p class="faint mt-1 text-xs">{voiceStatus.device}</p>
             {/if}
+            <div class="flex flex-wrap gap-2">
+              <span class="chip">
+                <span
+                  class="dot"
+                  style="background: {voiceStatus?.mic
+                    ? 'var(--success)'
+                    : 'var(--warn)'};"
+                ></span>
+                {t("voice.mic")}: {voiceStatus
+                  ? voiceStatus.mic
+                    ? t("voice.ready")
+                    : t("voice.notReady")
+                  : "…"}
+              </span>
+              <span class="chip">
+                <span
+                  class="dot"
+                  style="background: {effectiveStt().ready === false
+                    ? 'var(--warn)'
+                    : effectiveStt().ready
+                      ? 'var(--success)'
+                      : 'var(--border-strong)'};"
+                ></span>
+                {t("voice.model")}: {effectiveStt().name}
+              </span>
+              {#if voiceStatus?.mixer}
+                <span class="chip">
+                  <span
+                    class="dot"
+                    style="background: {voiceStatus.mixer.muted ||
+                    voiceStatus.mixer.volume < 0.5
+                      ? 'var(--warn)'
+                      : 'var(--success)'};"
+                  ></span>
+                  {t("voice.osGain")}: {voiceStatus.mixer.muted
+                    ? t("voice.muted")
+                    : `${Math.round(voiceStatus.mixer.volume * 100)} %`}
+                </span>
+              {/if}
+            </div>
           </div>
-          <div>
-            <p class="label">{t("voice.sttModel")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.sttModel")}</h3>
             <SelectMenu
               label={t("voice.sttModel")}
               value={voice.sttModel}
@@ -386,8 +393,42 @@
             />
             <p class="faint mt-1 text-xs">{t("voice.sttHint")}</p>
           </div>
-          <div>
-            <p class="label">{t("voice.sensitivity")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.models")}</h3>
+            <div class="flex flex-col gap-2">
+              {#each sttCatalog() as m (m.name)}
+                <div class="flex items-center gap-2">
+                  <span class="chip">
+                    <span
+                      class="dot"
+                      style="background: {m.ready
+                        ? 'var(--success)'
+                        : 'var(--border-strong)'};"
+                    ></span>
+                    {m.name} · ~{m.sizeMb} MB
+                  </span>
+                  <span class="faint text-xs">
+                    {m.ready ? t("voice.downloaded") : t("voice.notDownloaded")}
+                  </span>
+                  {#if m.ready}
+                    <button
+                      class="btn btn-ghost"
+                      style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                      onclick={() => void deleteSttModel(m.name, m.sizeMb)}
+                      aria-label={`${t("voice.deleteModel")}: ${m.name}`}
+                    >
+                      {t("voice.deleteModel")}
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            {#if modelsError}
+              <p class="error-box mt-2">{modelsError}</p>
+            {/if}
+          </div>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.sensitivity")}</h3>
             <div class="flex flex-wrap gap-2">
               {#each ["low", "medium", "high"] as VoiceSensitivity[] as v (v)}
                 <button
@@ -408,8 +449,8 @@
             </div>
             <p class="faint mt-1 text-xs">{t("voice.sensHint")}</p>
           </div>
-          <div>
-            <p class="label">{t("voice.hotkey")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.hotkey")}</h3>
             <div class="flex flex-wrap items-center gap-2">
               <button
                 class="chip"
@@ -434,48 +475,8 @@
             </div>
             <p class="faint mt-1 text-xs">{t("voice.hotkeyHint")}</p>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <span class="chip">
-              <span
-                class="dot"
-                style="background: {voiceStatus?.mic
-                  ? 'var(--success)'
-                  : 'var(--warn)'};"
-              ></span>
-              {t("voice.mic")}: {voiceStatus
-                ? voiceStatus.mic
-                  ? t("voice.ready")
-                  : t("voice.notReady")
-                : "…"}
-            </span>
-            <span class="chip">
-              <span
-                class="dot"
-                style="background: {effectiveStt().ready === false
-                  ? 'var(--warn)'
-                  : effectiveStt().ready
-                    ? 'var(--success)'
-                    : 'var(--border-strong)'};"
-              ></span>
-              {t("voice.model")}: {effectiveStt().name}
-            </span>
-            {#if voiceStatus?.mixer}
-              <span class="chip">
-                <span
-                  class="dot"
-                  style="background: {voiceStatus.mixer.muted ||
-                  voiceStatus.mixer.volume < 0.5
-                    ? 'var(--warn)'
-                    : 'var(--success)'};"
-                ></span>
-                {t("voice.osGain")}: {voiceStatus.mixer.muted
-                  ? t("voice.muted")
-                  : `${Math.round(voiceStatus.mixer.volume * 100)} %`}
-              </span>
-            {/if}
-          </div>
-          <div>
-            <p class="label">{t("voice.mode")}</p>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.mode")}</h3>
             <div class="flex flex-wrap gap-2">
               {#each ["manual", "wake", "conversation"] as VoiceMode[] as v (v)}
                 <button
@@ -495,8 +496,10 @@
               {/each}
             </div>
           </div>
-          <div>
-            <label class="label" for="voice-wake">{t("voice.wakeWord")}</label>
+          <div class="group-card">
+            <label class="group-title" for="voice-wake"
+              >{t("voice.wakeWord")}</label
+            >
             <input
               id="voice-wake"
               class="field"
@@ -510,34 +513,38 @@
             />
             <p class="faint mt-1 text-xs">{t("voice.wakeHint")}</p>
           </div>
-          <div class="flex items-center justify-between gap-4">
-            <div>
-              <p class="text-sm font-bold">{t("voice.speak")}</p>
-              <p class="muted mt-0.5 text-xs">{t("voice.speakHint")}</p>
+          <div class="group-card">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <p class="text-sm font-bold">{t("voice.speak")}</p>
+                <p class="muted mt-0.5 text-xs">{t("voice.speakHint")}</p>
+              </div>
+              <button
+                class="switch"
+                role="switch"
+                aria-checked={voice.speakEnabled}
+                aria-label={t("voice.speak")}
+                onclick={() => voice.setSpeakEnabled(!voice.speakEnabled)}
+              ></button>
             </div>
-            <button
-              class="switch"
-              role="switch"
-              aria-checked={voice.speakEnabled}
-              aria-label={t("voice.speak")}
-              onclick={() => voice.setSpeakEnabled(!voice.speakEnabled)}
-            ></button>
           </div>
         </div>
       {:else}
-        <div class="flex flex-col gap-3">
-          <div>
-            <p class="label">{t("auth.email")}</p>
+        <div class="flex flex-col gap-4">
+          <div class="group-card">
+            <h3 class="group-title">{t("auth.email")}</h3>
             <p class="text-sm font-semibold">{auth.user?.email}</p>
             <p class="faint mt-0.5 text-xs">{t("settings.accountNote")}</p>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <button class="btn btn-ghost" onclick={logout}>
-              {t("auth.logout")}
-            </button>
-            <button class="btn btn-danger" onclick={remove}>
-              {t("auth.delete")}
-            </button>
+          <div class="group-card">
+            <div class="flex flex-wrap gap-2">
+              <button class="btn btn-ghost" onclick={logout}>
+                {t("auth.logout")}
+              </button>
+              <button class="btn btn-danger" onclick={remove}>
+                {t("auth.delete")}
+              </button>
+            </div>
           </div>
         </div>
       {/if}

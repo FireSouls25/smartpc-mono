@@ -3,7 +3,7 @@
 //! Keys live in the OS credential store (see secrets.rs) or OPENCODE_API_KEY.
 use super::{
     openai_compat::{OpenAiCompatClient, OpenAiCompatConfig},
-    provider::{ChatMessage, ChatOptions, ChatResponse, LlmProvider, ProviderError, Role},
+    provider::{ChatMessage, ChatOptions, LlmProvider, ProviderError, Role},
 };
 
 pub const BASE_URL: &str = "https://opencode.ai/zen/v1";
@@ -50,19 +50,6 @@ impl OpenCodeCompat {
         ids.sort();
         ids
     }
-
-    /// Free-tier Zen models declare no tool support: sending `tools` fails
-    /// the whole request upstream, so strip them up front and answer plain
-    /// (the agent loop already handles tool-less replies).
-    const NO_TOOL_IDS: &[&str] = &[
-        "big-pickle",
-        "hy3-free",
-        "laguna-s-2.1-free",
-        "mimo-v2.5-free",
-        "nemotron-3-ultra-free",
-        "nemotron-3.5-lightning-free",
-        "deepseek-v4-flash-free",
-    ];
 
     /// Model families served by POST /chat/completions (per the Zen docs).
     /// Other families live on different endpoints (`gpt-*`/Muse Spark on
@@ -139,7 +126,6 @@ impl OpenCodeCompat {
     /// the key is good; else any 401/403 means bad key; else connectivity
     /// trouble; else inconclusive (never false "invalid").
     pub async fn verify_key(key: &str) -> Result<Option<String>, VerifyError> {
-        use super::provider::Provider;
         let catalog = Self::with_key(None)
             .map_err(|e| VerifyError::Inconclusive(format!("setup failed: {e:?}")))?
             .models()
@@ -166,9 +152,10 @@ impl OpenCodeCompat {
             if i > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
-            let mut keyed = Provider::resolve_with_key("opencode", Some(key.to_string()))
+            let mut keyed = OpenCodeCompat::new()
                 .map_err(|e| VerifyError::Inconclusive(format!("setup failed: {e:?}")))?;
             // Verify calls are one throwaway conversation for routing.
+            keyed.set_api_key(Some(key.to_string()));
             keyed.set_session_id(Some("verify".into()));
             let opts = ChatOptions {
                 model: model.clone(),
@@ -179,12 +166,11 @@ impl OpenCodeCompat {
             let msg = ChatMessage {
                 role: Role::User,
                 content: "Reply with exactly: ok".into(),
-                tool_calls: None,
             };
             // Every attempt lands in the diagnostics ring buffer too:
             // stderr is invisible under Electron, and per-model outcomes
             // are the only way to tell a bad key from gateway flapping.
-            match keyed.chat(vec![msg], &opts).await {
+            match keyed.client.chat(vec![msg], &opts).await {
                 Ok(_) => {
                     crate::diagnostics::push(format!("verify opencode: {model} ok"));
                     return Ok(Some(model.clone()));
@@ -257,34 +243,6 @@ impl LlmProvider for OpenCodeCompat {
 
     fn set_session_id(&mut self, id: Option<String>) {
         self.client.set_session_id(id);
-    }
-
-    fn supports_tools(&self, model: &str) -> bool {
-        !Self::NO_TOOL_IDS.iter().any(|id| *id == model)
-    }
-
-    async fn chat(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-    ) -> Result<ChatResponse, ProviderError> {
-        self.client.chat(messages, opts).await
-    }
-
-    async fn chat_with_tools(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-        tools: &[serde_json::Value],
-    ) -> Result<super::provider::ToolChatResponse, ProviderError> {
-        if Self::NO_TOOL_IDS.iter().any(|id| *id == opts.model) {
-            let plain = self.client.chat(messages, opts).await?;
-            return Ok(super::provider::ToolChatResponse {
-                text: plain.text,
-                tool_calls: vec![],
-            });
-        }
-        self.client.chat_with_tools(messages, opts, tools).await
     }
 
     async fn models(&self) -> Result<Vec<String>, ProviderError> {

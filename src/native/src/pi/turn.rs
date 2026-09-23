@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::supervisor::{PiError, PiSupervisor, CHILD_REQ_TIMEOUT, TURN_TIMEOUT};
 use crate::chat::store::ChatStore;
-use crate::harness::agent::TraceStep;
+use crate::harness::tools::TraceStep;
 
 pub struct TurnInput {
     pub user_id: String,
@@ -310,11 +310,36 @@ async fn run_turn_inner(
 
     let mut pending_steps: HashMap<String, PendingStep> = HashMap::new();
     let mut steps: Vec<TraceStep> = Vec::new();
+    // Cancel check rides a short recv timeout: token streams stall between
+    // events, and a cancelled turn must unwind promptly (not at TURN_TIMEOUT)
+    // so the next send doesn't queue behind it on the per-user turn lock.
+    async fn cancel_and_unwind(
+        child: &super::supervisor::ChildHandle,
+    ) -> PiError {
+        let _ = child
+            .command(
+                serde_json::json!({"id": "abort-x", "type": "abort"}),
+                Duration::from_secs(15),
+            )
+            .await;
+        crate::diagnostics::push("pi: turn cancelled, unwound".to_string());
+        PiError::Cancelled
+    }
     let outcome = tokio::time::timeout(TURN_TIMEOUT, async {
         loop {
-            let ev = rx.recv().await.map_err(|_| {
-                PiError::TurnFailed("pi event stream ended mid-turn".to_string())
-            })?;
+            if child.take_cancel() {
+                return Err(cancel_and_unwind(child).await);
+            }
+            let ev = match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+            {
+                Ok(Ok(ev)) => ev,
+                Ok(Err(_)) => {
+                    return Err(PiError::TurnFailed(
+                        "pi event stream ended mid-turn".to_string(),
+                    ));
+                }
+                Err(_) => continue,
+            };
             let kind = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match kind {
                 "agent_settled" => break,
@@ -342,7 +367,7 @@ async fn run_turn_inner(
                             "pi called unregistered tool: {tool}"
                         )));
                     }
-                    let title = crate::harness::agent::title_for(&tool, &args);
+                    let title = crate::harness::tools::title_for(&tool, &args);
                     let action_id = action_started(
                         chat,
                         &input.chat_session_id,

@@ -251,4 +251,34 @@ describe("sidecar contract", () => {
     });
     expect(stop.ok).toBe(true);
   });
+
+  test("voice model uninstall validates and stays idempotent", async () => {
+    const bad = await fetch(`${BASE}/v1/voice/models/medium`, {
+      method: "DELETE",
+      headers: gate,
+    });
+    expect(bad.status).toBe(400);
+    const body = (await bad.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("invalid_model");
+    // Temp models dir: earlier tests may have downloaded tiny (real mic
+    // here) — either way removal works, and the second call is a clean no-op.
+    const gone = await fetch(`${BASE}/v1/voice/models/tiny`, {
+      method: "DELETE",
+      headers: gate,
+    });
+    expect(gone.ok).toBe(true);
+    const goneBody = (await gone.json()) as { ok: boolean; removed: boolean };
+    expect(goneBody.ok).toBe(true);
+    expect(typeof goneBody.removed).toBe("boolean");
+    const goneAgain = await fetch(`${BASE}/v1/voice/models/tiny`, {
+      method: "DELETE",
+      headers: gate,
+    });
+    const goneAgainBody = (await goneAgain.json()) as {
+      ok: boolean;
+      removed: boolean;
+    };
+    expect(goneAgainBody.ok).toBe(true);
+    expect(goneAgainBody.removed).toBe(false);
+  });
 });

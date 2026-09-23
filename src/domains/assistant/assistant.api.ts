@@ -123,7 +123,12 @@ export const aiApi = {
   run: (
     message: string,
     sessionId: string | null,
-    opts?: { provider?: string; model?: string; lang?: string },
+    opts?: {
+      provider?: string;
+      model?: string;
+      lang?: string;
+      signal?: AbortSignal;
+    },
   ) =>
     api<RunResponse>("/v1/ai/run", {
       method: "POST",
@@ -137,6 +142,15 @@ export const aiApi = {
       ...withAuth(auth.token ?? undefined),
       // Multi-step agent loop: the longest call in the app.
       timeoutMs: 600000,
+      signal: opts?.signal,
+    }),
+
+  /** Flag the in-flight turn for cancellation (best-effort, idempotent). */
+  cancel: () =>
+    api<{ ok: boolean }>("/v1/ai/cancel", {
+      method: "POST",
+      timeoutMs: 15000,
+      ...withAuth(auth.token ?? undefined),
     }),
 
   sessions: () =>

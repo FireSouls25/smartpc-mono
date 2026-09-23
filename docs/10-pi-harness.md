@@ -1,9 +1,15 @@
-# 10 — Pi harness migration (embedded RPC)
+# 10 — Pi harness: the reasoning engine (embedded RPC)
 
-Status: **Phase 1 implemented 2026-09-22, behind `PI_HARNESS=1`** (default
-off; native loop still serves). Proven live: providers from pi catalog,
+Status: **pi is the only engine** (native hand-rolled loop removed
+2026-09-23): `harness/agent.rs` deleted, `chat`/`run` both run
+`pi_chat_turn`, the provider catalog comes from pi, vendors expose only
+identity + catalog + credentials. Proven live: providers from pi catalog,
 plain + tool turns through `pi --mode rpc` + ollama/gemma4, actions persisted,
 `test:e2e:pi` green through the real UI.
+
+Cancellation: the renderer aborts its HTTP wait and flags the turn via
+`POST /v1/ai/cancel`; the turn loop aborts pi and unwinds (new
+`PiError::Cancelled`), freeing the per-user turn lock.
 
 ## Validated spikes (do not re-prove)
 

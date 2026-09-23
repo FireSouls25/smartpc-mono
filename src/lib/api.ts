@@ -58,10 +58,20 @@ interface Options {
    * a number overrides with that many ms.
    */
   timeoutMs?: number | null;
+  /** User-initiated abort (Detener button): combined with the timeout. */
+  signal?: AbortSignal;
 }
 
 export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const gate = sidecarToken();
+  const timeout =
+    opts.timeoutMs === null
+      ? undefined
+      : AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal =
+    timeout && opts.signal
+      ? AbortSignal.any([timeout, opts.signal])
+      : (opts.signal ?? timeout);
   let res: Response;
   try {
     res = await fetch(base() + path, {
@@ -72,10 +82,7 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
         ...(gate ? { "X-Sidecar-Token": gate } : {}),
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      signal:
-        opts.timeoutMs === null
-          ? undefined
-          : AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      signal,
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {

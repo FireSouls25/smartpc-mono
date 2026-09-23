@@ -41,6 +41,77 @@
 
   // Global push-to-talk: the mic toggle shortcut works from anywhere.
   onMount(() => installVoiceHotkey());
+
+  /* Resizable panes (lg+): side widths persist across restarts; the center
+   * always takes the remainder (flex-1, never hardcoded). Below lg the
+   * panes stack and dividers hide.
+   */
+  const PANES_KEY = "smartpc.panes";
+  const MIN_A = 200;
+  const MIN_C = 220;
+  const DEFAULT_A = 280;
+  const DEFAULT_C = 300;
+
+  function loadPanes(): { a: number; c: number } {
+    try {
+      const raw = window.localStorage.getItem(PANES_KEY);
+      if (raw) {
+        const p = JSON.parse(raw) as { a?: unknown; c?: unknown };
+        const a = typeof p.a === "number" && p.a >= MIN_A ? p.a : DEFAULT_A;
+        const c = typeof p.c === "number" && p.c >= MIN_C ? p.c : DEFAULT_C;
+        return { a, c };
+      }
+    } catch {
+      /* private mode */
+    }
+    return { a: DEFAULT_A, c: DEFAULT_C };
+  }
+
+  let paneA = $state(loadPanes().a);
+  let paneC = $state(loadPanes().c);
+
+  function savePanes(): void {
+    try {
+      window.localStorage.setItem(
+        PANES_KEY,
+        JSON.stringify({ a: paneA, c: paneC }),
+      );
+    } catch {
+      /* private mode */
+    }
+  }
+
+  let dragSide = $state<"a" | "c" | null>(null);
+
+  function dividerDown(side: "a" | "c", e: PointerEvent): void {
+    dragSide = side;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function dividerMove(e: PointerEvent, container: HTMLElement | null): void {
+    if (!dragSide || !container) return;
+    const rect = container.getBoundingClientRect();
+    if (dragSide === "a") {
+      paneA = Math.min(
+        Math.max(MIN_A, e.clientX - rect.left),
+        rect.width - 320 - MIN_C,
+      );
+    } else {
+      paneC = Math.min(
+        Math.max(MIN_C, rect.right - e.clientX),
+        rect.width - 320 - MIN_A,
+      );
+    }
+  }
+
+  function dividerUp(): void {
+    if (dragSide) {
+      dragSide = null;
+      savePanes();
+    }
+  }
+
+  let panesEl: HTMLElement | null = $state(null);
 </script>
 
 <div class="dot-bg min-h-dvh lg:h-dvh lg:overflow-hidden">
@@ -58,15 +129,45 @@
     <TopBar onSettings={() => navigate("settings")} />
     {#if view() === "main"}
       <div
-        class="grid flex-1 gap-4 pb-4 md:pb-8 lg:min-h-0 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_300px]"
+        bind:this={panesEl}
+        class="flex flex-1 flex-col gap-4 pb-4 md:pb-8 lg:min-h-0 lg:flex-row lg:gap-0 lg:pb-8"
+        role="group"
+        aria-label="Panels"
+        onpointermove={(e) => dividerMove(e, panesEl)}
+        onpointerup={dividerUp}
+        onpointercancel={dividerUp}
       >
-        <div class="pane-a flex min-h-0 flex-col">
+        <div
+          class="pane-a flex min-h-0 flex-col lg:shrink-0"
+          style:flex-basis={`${paneA}px`}
+        >
           <EventsFeed />
         </div>
-        <div class="pane-b flex min-h-0 flex-col">
+        <div
+          class="divider hidden w-3 shrink-0 cursor-col-resize touch-none items-stretch justify-center lg:flex"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panels"
+          onpointerdown={(e) => dividerDown("a", e)}
+        >
+          <span class="w-1 rounded-full"></span>
+        </div>
+        <div class="pane-b flex min-h-0 min-w-0 flex-1 flex-col">
           <CenterPanel />
         </div>
-        <div class="pane-c hidden min-h-0 flex-col xl:flex">
+        <div
+          class="divider hidden w-3 shrink-0 cursor-col-resize touch-none items-stretch justify-center xl:flex"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize panels"
+          onpointerdown={(e) => dividerDown("c", e)}
+        >
+          <span class="w-1 rounded-full"></span>
+        </div>
+        <div
+          class="pane-c hidden min-h-0 flex-col lg:shrink-0 xl:flex"
+          style:flex-basis={`${paneC}px`}
+        >
           <SessionsPane />
         </div>
       </div>

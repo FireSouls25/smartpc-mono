@@ -17,70 +17,6 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<AssistantToolCall>>,
-}
-
-/// Wire shape for echoing a tool call back to the model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssistantToolCall {
-    pub id: Option<String>,
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    pub function: FunctionRef,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionRef {
-    pub name: String,
-    pub arguments: String,
-}
-
-/// A tool call as parsed from a provider response. `arguments` arrives
-/// either as an object or as a JSON string depending on the server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: Option<String>,
-    #[serde(rename = "type", default)]
-    pub kind: Option<String>,
-    pub function: ToolFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolFunction {
-    pub name: String,
-    pub arguments: ToolArgs,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ToolArgs {
-    Text(String),
-    Obj(serde_json::Value),
-}
-
-impl ToolArgs {
-    pub fn to_value(&self) -> serde_json::Value {
-        match self {
-            ToolArgs::Text(s) => {
-                serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
-            }
-            ToolArgs::Obj(v) => v.clone(),
-        }
-    }
-
-    pub fn as_string(&self) -> String {
-        match self {
-            ToolArgs::Text(s) => s.clone(),
-            ToolArgs::Obj(v) => v.to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolChatResponse {
-    pub text: String,
-    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,12 +25,6 @@ pub struct ChatOptions {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub json_mode: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatResponse {
-    pub text: String,
-    pub model: String,
 }
 
 #[derive(Debug)]
@@ -154,9 +84,9 @@ impl ProviderError {
     }
 }
 
-/// The contract every vendor implements. Small on purpose: chat in, text out,
-///
-/// plus a live model listing so the UI only offers what truly exists.
+/// The contract every vendor implements. Small on purpose: pi reasons, so
+/// vendors only expose identity, catalog, and credentials — inference goes
+/// through the pi child, never through a direct client call.
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &'static str;
     fn default_model(&self) -> &str;
@@ -166,23 +96,6 @@ pub trait LlmProvider: Send + Sync {
     /// Stable conversation id for gateways with session affinity
     /// (Zen requires `x-opencode-session`). Default: ignored.
     fn set_session_id(&mut self, _id: Option<String>) {}
-    /// Native function calling for `model`. False for vendors/models without
-    /// tool support (Zen free tier): the agent falls back to text-embedded
-    /// calls. Default: true.
-    fn supports_tools(&self, _model: &str) -> bool {
-        true
-    }
-    fn chat(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-    ) -> impl Future<Output = Result<ChatResponse, ProviderError>> + Send;
-    fn chat_with_tools(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-        tools: &[serde_json::Value],
-    ) -> impl Future<Output = Result<ToolChatResponse, ProviderError>> + Send;
     fn models(&self) -> impl Future<Output = Result<Vec<String>, ProviderError>> + Send;
 }
 
@@ -266,18 +179,6 @@ impl Provider {
         }
     }
 
-    pub async fn chat(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-    ) -> Result<ChatResponse, ProviderError> {
-        match self {
-            Self::Ollama(p) => p.chat(messages, opts).await,
-            Self::LlamaCpp(p) => p.chat(messages, opts).await,
-            Self::OpenCode(p) => p.chat(messages, opts).await,
-        }
-    }
-
     pub async fn models(&self) -> Result<Vec<String>, ProviderError> {
         match self {
             Self::Ollama(p) => p.models().await,
@@ -301,31 +202,6 @@ impl LlmProvider for Provider {
             Self::Ollama(p) => p.default_model(),
             Self::LlamaCpp(p) => p.default_model(),
             Self::OpenCode(p) => p.default_model(),
-        }
-    }
-
-    async fn chat(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-    ) -> Result<ChatResponse, ProviderError> {
-        match self {
-            Self::Ollama(p) => p.chat(messages, opts).await,
-            Self::LlamaCpp(p) => p.chat(messages, opts).await,
-            Self::OpenCode(p) => p.chat(messages, opts).await,
-        }
-    }
-
-    async fn chat_with_tools(
-        &self,
-        messages: Vec<ChatMessage>,
-        opts: &ChatOptions,
-        tools: &[serde_json::Value],
-    ) -> Result<ToolChatResponse, ProviderError> {
-        match self {
-            Self::Ollama(p) => p.chat_with_tools(messages, opts, tools).await,
-            Self::LlamaCpp(p) => p.chat_with_tools(messages, opts, tools).await,
-            Self::OpenCode(p) => p.chat_with_tools(messages, opts, tools).await,
         }
     }
 

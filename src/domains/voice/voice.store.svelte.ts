@@ -253,6 +253,17 @@ async function handle(ev: VoiceEvent): Promise<void> {
       phase = "idle";
       run++;
       if (chat.orb === "listening") chat.setOrb("idle");
+      if (conversationActive) {
+        // Turn ended with no transcript (silence, or the backend's empty
+        // cap): keep the loop alive, but stop chasing pure noise.
+        emptyTurns++;
+        if (emptyTurns >= 3) {
+          error = t("voice.convoEmpty");
+          void stopAll();
+        } else {
+          scheduleNextTurn();
+        }
+      }
       break;
   }
 }
@@ -283,6 +294,7 @@ const CONVO_NEXT_PAUSE_MS = 800;
 
 let conversationActive = $state(false);
 let convoTurns = 0;
+let emptyTurns = 0;
 let convoTimer: number | null = null;
 let lastSpokenNorm = "";
 
@@ -340,6 +352,7 @@ function startConversation(): void {
   setMode("conversation");
   conversationActive = true;
   convoTurns = 0;
+  emptyTurns = 0;
   error = "";
   void start();
 }
@@ -351,6 +364,7 @@ async function onConversationTranscript(clean: string): Promise<void> {
     scheduleNextTurn();
     return;
   }
+  emptyTurns = 0;
   const dispatched = await chat.send(clean);
   if (!dispatched) {
     // Agent busy mid-loop: park the words, end the loop (no pile-up).

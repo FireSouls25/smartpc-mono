@@ -65,21 +65,11 @@ pub(crate) async fn probe(id: &str) -> serde_json::Value {
 
 /// Live detection: probes every known provider concurrently.
 /// The UI offers only what answers; the rest renders as unavailable.
-/// With `PI_HARNESS=1` the catalog comes from pi (plus the same loopback
-/// probes), so the UI reads what pi supports.
+/// The catalog comes from pi (plus the same loopback probes), so the UI
+/// reads what pi supports.
 pub async fn providers(State(s): State<AppState>) -> impl IntoResponse {
-    if crate::pi::enabled() {
-        let list = crate::pi::providers::catalog(&s).await;
-        return (StatusCode::OK, Json(serde_json::json!({ "providers": list })))
-            .into_response();
-    }
-    let (ollama, llamacpp, opencode) =
-        tokio::join!(probe("ollama"), probe("llama.cpp"), probe("opencode"));
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "providers": [ollama, llamacpp, opencode] })),
-    )
-        .into_response()
+    let list = crate::pi::providers::catalog(&s).await;
+    (StatusCode::OK, Json(serde_json::json!({ "providers": list }))).into_response()
 }
 
 /// Launch a startable local server (`ollama serve`) and wait until it

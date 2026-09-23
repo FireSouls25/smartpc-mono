@@ -18,7 +18,7 @@
     "test:contract": "vitest run --project contract",
     "test:e2e": "playwright test --grep-invert @slow",
     "test:e2e:all": "playwright test",
-    "test:e2e:pi": "PI_HARNESS=1 SIDECAR_PORT=18082 APP_PORT=5200 playwright test layout.spec.ts -g \"real send\"",
+    "test:e2e:pi": "SIDECAR_PORT=18082 APP_PORT=5200 playwright test layout.spec.ts -g \"real send\"",
     "verify": "npm run check && npm run lint && npm run format:check && npm run test:unit",
     "preview": "vite preview"
   },

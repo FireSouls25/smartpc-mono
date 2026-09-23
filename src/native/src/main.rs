@@ -112,9 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models_dir = std::env::var("WHISPER_MODEL_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("models"));
-    // pi harness (Phase 1, behind PI_HARNESS=1): static system prompt baked
-    // once per boot; per-turn facts ride in the message (see turn_context).
-    // A missing prompt file fails pi turns loudly at spawn, never silently.
+    // pi system prompt baked once per boot; per-turn facts ride in the
+    // message (see turn_context). A missing prompt file fails pi turns
+    // loudly at spawn, never silently.
     let prompt_path = data_dir.join("pi-system-prompt.txt");
     {
         let prompt = crate::harness::prompt::static_prompt(

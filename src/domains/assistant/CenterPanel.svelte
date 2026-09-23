@@ -142,19 +142,41 @@
         value={chat.draft}
         oninput={(e) => chat.setDraft(e.currentTarget.value)}
       />
-      <button class="btn btn-primary shrink-0" type="submit">
-        <svg
-          viewBox="0 0 24 24"
-          class="h-4 w-4"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <path d="M22 2 11 13M22 2l-7 20-4-9-9-4z" />
-        </svg>
-        {t("chat.send")}
+      <button
+        class="btn shrink-0 {chat.orb === 'thinking' ? '' : 'btn-primary'}"
+        type={chat.orb === "thinking" ? "button" : "submit"}
+        style={chat.orb === "thinking"
+          ? "background: var(--danger); color: #fff;"
+          : ""}
+        onclick={() => {
+          if (chat.orb === "thinking") void chat.cancel();
+        }}
+        aria-label={chat.orb === "thinking" ? t("chat.stop") : t("chat.send")}
+      >
+        {#if chat.orb === "thinking"}
+          <svg
+            viewBox="0 0 24 24"
+            class="h-4 w-4"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+          {t("chat.stop")}
+        {:else}
+          <svg
+            viewBox="0 0 24 24"
+            class="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M22 2 11 13M22 2l-7 20-4-9-9-4z" />
+          </svg>
+          {t("chat.send")}
+        {/if}
       </button>
     </form>
     {#if voice.error}

@@ -148,6 +148,33 @@ body {
     color: var(--fg-muted);
     margin-bottom: 0.375rem;
   }
+  /* ---- Settings groups: one card per option, loud titles ---- */
+  .group-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 1.25rem;
+    padding: 1.125rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .group-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 800;
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+  }
+  .group-title::before {
+    content: "";
+    width: 0.375rem;
+    height: 1.25rem;
+    border-radius: 999px;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
   .chip {
     display: inline-flex;
     align-items: center;
@@ -319,6 +346,14 @@ body {
     min-width: 100%;
     max-height: 16rem;
     overflow-y: auto;
+  }
+  /* Pane dividers (resizable main layout): quiet until hover/drag. */
+  .divider span {
+    background: var(--border);
+    transition: background 0.15s ease;
+  }
+  .divider:hover span {
+    background: var(--accent);
   }
   .switch {
     position: relative;

@@ -70,4 +70,11 @@ export const voiceApi = {
       method: "POST",
       timeoutMs: 10000,
     }),
+
+  /** Uninstall a downloaded whisper model (idempotent). */
+  deleteSttModel: (name: string) =>
+    api<{ ok: boolean; removed: boolean }>(
+      `/v1/voice/models/${encodeURIComponent(name)}`,
+      { method: "DELETE", timeoutMs: 30000 },
+    ),
 };

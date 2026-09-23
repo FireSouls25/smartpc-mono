@@ -221,6 +221,11 @@ impl VoiceService {
         }
     }
 
+    /// Where whisper model files live (uninstall endpoint needs it).
+    pub fn models_dir(&self) -> std::path::PathBuf {
+        self.models_dir.clone()
+    }
+
     fn push_event(&self, epoch: u64, event: VoiceEvent) {
         if let Ok(mut inner) = self.inner.lock() {
             let seq = inner.next_seq;
@@ -596,7 +601,15 @@ struct Listener {
     frames_seen: u64,
     max_rms: f32,
     captures: u64,
+    /// Consecutive empty transcriptions (noise). Bounds the hot-mic loop:
+    /// a sensitive threshold on room noise would otherwise transcribe
+    /// forever and never deliver text.
+    empty_runs: u32,
 }
+
+/// Empty transcriptions in a row before a manual/conversation turn gives
+/// up (wake mode is exempt: indefinite arming is its job).
+const MAX_EMPTY_RUNS: u32 = 5;
 
 impl Listener {
     fn new(
@@ -633,6 +646,7 @@ impl Listener {
             frames_seen: 0,
             max_rms: 0.0,
             captures: 0,
+            empty_runs: 0,
         }
     }
 
@@ -810,8 +824,24 @@ impl Listener {
             crate::diagnostics::push(
                 "voice: transcript empty (noise, not speech?)".to_string(),
             );
+            // Hot mic + sensitive threshold = endless noise loop (transcribe
+            // forever, deliver nothing). Manual/conversation turns give up
+            // after a bounded run; wake mode is exempt (arming is its job).
+            self.empty_runs += 1;
+            if self.empty_runs >= MAX_EMPTY_RUNS
+                && matches!(
+                    self.opts.mode,
+                    ListenMode::Manual | ListenMode::Conversation
+                )
+            {
+                crate::diagnostics::push(
+                    "voice: 5 empty transcriptions in a row, ending (threshold likely too sensitive)".to_string(),
+                );
+                self.stop.store(true, Ordering::Relaxed);
+            }
             return;
         }
+        self.empty_runs = 0;
         crate::diagnostics::push(format!("voice: heard {}", preview(&text)));
         match self.opts.mode {
             // Conversation ends the backend turn exactly like manual; the

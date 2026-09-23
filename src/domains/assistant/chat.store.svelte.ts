@@ -135,15 +135,20 @@ async function deleteSession(id: string): Promise<void> {
  * Returns whether the text was dispatched (false = dropped: empty or the
  * agent is still thinking; callers keep the text instead of losing it).
  */
+let sendController: AbortController | null = null;
+
 async function send(text: string): Promise<boolean> {
   const clean = text.trim();
   if (!clean || orb === "thinking") return false;
   messages = [...messages, { role: "user", text: clean }];
   draft = "";
   orb = "thinking";
+  const controller = new AbortController();
+  sendController = controller;
   try {
     const res = await aiApi.run(clean, sessionStore.activeSessionId, {
       lang: getLang(),
+      signal: controller.signal,
     });
     sessionStore.setActive(res.session_id, null);
     contextUsed = res.context.used_tokens;
@@ -168,17 +173,36 @@ async function send(text: string): Promise<boolean> {
     sessionStore.clearCombo();
     notifyReply();
   } catch (err) {
-    const msg =
-      err instanceof ApiError && err.code === "timeout"
-        ? t("chat.timeout")
-        : err instanceof Error
-          ? err.message
-          : "Error";
-    messages = [...messages, { role: "assistant", text: `Error: ${msg}` }];
+    if (
+      err instanceof DOMException &&
+      err.name === "AbortError" &&
+      controller.signal.aborted
+    ) {
+      // User hit Detener: no error bubble, the user message stays for retry.
+    } else {
+      const msg =
+        err instanceof ApiError && err.code === "timeout"
+          ? t("chat.timeout")
+          : err instanceof Error
+            ? err.message
+            : "Error";
+      messages = [...messages, { role: "assistant", text: `Error: ${msg}` }];
+    }
   } finally {
+    if (sendController === controller) sendController = null;
     orb = "idle";
   }
   return true;
+}
+
+/** Detener: abort the HTTP wait AND flag the server turn for unwind. */
+async function cancel(): Promise<void> {
+  sendController?.abort();
+  try {
+    await aiApi.cancel();
+  } catch {
+    /* best-effort: the local abort already freed the UI */
+  }
 }
 
 export const chatStore = {
@@ -204,4 +228,5 @@ export const chatStore = {
   adoptSessionCombo,
   deleteSession,
   send,
+  cancel,
 };

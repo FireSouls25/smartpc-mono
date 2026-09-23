@@ -118,6 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ai/selection", get(crate::chat::routes::selection))
         .route("/v1/ai/chat", post(crate::chat::routes::chat))
         .route("/v1/ai/run", post(crate::chat::routes::run))
+        .route("/v1/ai/cancel", post(crate::chat::routes::cancel_turn))
         .route(
             "/v1/chat/sessions",
             get(crate::chat::routes::list_sessions).post(crate::chat::routes::create_session),
@@ -157,6 +158,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/voice/events", get(crate::stt::routes::events))
         .route("/v1/voice/speak", post(crate::stt::routes::speak))
         .route("/v1/voice/speak-stop", post(crate::stt::routes::speak_stop))
+        .route(
+            "/v1/voice/models/{name}",
+            delete(crate::stt::routes::delete_model),
+        )
         .route("/internal/pi/tools", post(crate::pi::routes::tools))
         .route("/internal/pi/bootstrap", post(crate::pi::routes::bootstrap))
         .route("/internal/pi/tool", post(crate::pi::routes::tool))

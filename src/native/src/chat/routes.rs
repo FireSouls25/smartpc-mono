@@ -4,7 +4,7 @@
 //! Plain chat only stores text. Actions are created exclusively by command
 //! execution (the future executor will POST them); the left pane reads them
 //! per session, so old sessions show the actions they caused.
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -14,15 +14,10 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::model::{ChatMessageRow, Selection};
+use super::model::Selection;
 use super::store::ChatStore;
 use crate::{
-    ai::{
-        provider::{
-            ChatMessage as LlmMessage, ChatOptions, LlmProvider, Provider, ProviderError, Role,
-        },
-        routes::error_response,
-    },
+    ai::{provider::{LlmProvider, Provider}, routes::error_response},
     api::{AppState, AuthedUser},
 };
 
@@ -32,8 +27,6 @@ pub struct ChatBody {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub message: String,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -78,52 +71,6 @@ fn title_of(message: &str) -> String {
     } else {
         t
     }
-}
-
-/// History for the model: recent turns only, tool outputs truncated, total
-/// budget enforced. Long noisy histories degrade small-model instruction
-/// following (and eventually blow the context window), while the DB keeps
-/// everything for the UI.
-fn history_for_model(rows: Vec<ChatMessageRow>) -> Vec<LlmMessage> {
-    const TURNS: usize = 12;
-    const MAX_TOOL_CHARS: usize = 400;
-    const MAX_TOTAL_CHARS: usize = 6000;
-    let mut items: Vec<LlmMessage> = rows
-        .into_iter()
-        .rev()
-        .take(TURNS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|m| {
-            let role = if m.role == "assistant" {
-                Role::Assistant
-            } else if m.role == "tool" {
-                Role::Tool
-            } else {
-                Role::User
-            };
-            let mut content = m.content;
-            if matches!(role, Role::Tool) && content.chars().count() > MAX_TOOL_CHARS {
-                content = format!(
-                    "{}…[truncated]",
-                    content.chars().take(MAX_TOOL_CHARS).collect::<String>()
-                );
-            }
-            LlmMessage {
-                role,
-                content,
-                tool_calls: None,
-            }
-        })
-        .collect();
-    // Enforce the total budget, always keeping the newest turn (the request).
-    let mut total: usize = items.iter().map(|m| m.content.len()).sum();
-    while items.len() > 2 && total > MAX_TOTAL_CHARS {
-        total -= items[0].content.len();
-        items.remove(0);
-    }
-    items
 }
 
 /// Current persisted selection (or the default when never chosen).
@@ -281,11 +228,10 @@ pub async fn chat(
         }
     };
 
-    // Store the user message and snapshot a slimmed history for the model.
-    // The lock is released before any await.
+    // Store the user message. The lock is released before any await.
     // Session affinity: Zen routes per conversation id.
     provider.set_session_id(Some(session_id.clone()));
-    let history: Vec<LlmMessage> = {
+    {
         let store = match lock_chat(&s) {
             Ok(g) => g,
             Err(r) => return r,
@@ -293,31 +239,26 @@ pub async fn chat(
         if store.add_message(&session_id, "user", &message).is_err() {
             return internal();
         }
-        history_for_model(store.list_messages(&session_id).unwrap_or_default())
-    };
-
-    // Pi harness: unified with run (every turn may act; steps ignored here).
-    // The chat endpoint never carried a language: default like everywhere.
-    if crate::pi::enabled() {
-        let done = match pi_chat_turn(
-            &s, &uid, &session_id, &prov_name, &model_name, &message, "es",
-        )
-        .await
-        {
-            Ok(d) => d,
-            Err(r) => return r,
-        };
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "reply": done.reply, "model": model_name,
-                "provider": provider.name(), "session_id": session_id,
-            })),
-        )
-            .into_response();
     }
 
-    chat_with_history(&s, &session_id, &provider, &model_name, history, &b).await
+    // Every turn may act (steps ignored on this endpoint); the chat endpoint
+    // never carried a language: default like everywhere.
+    let done = match pi_chat_turn(
+        &s, &uid, &session_id, &prov_name, &model_name, &message, "es",
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "reply": done.reply, "model": model_name,
+            "provider": provider.name(), "session_id": session_id,
+        })),
+    )
+        .into_response()
 }
 
 fn resolve_for_chat(
@@ -367,39 +308,6 @@ fn provider_with_key(name: &str, uid: &str) -> Result<Provider, Response> {
             })),
         )
             .into_response()),
-    }
-}
-
-async fn chat_with_history(
-    s: &AppState,
-    session_id: &str,
-    provider: &Provider,
-    model_name: &str,
-    history: Vec<LlmMessage>,
-    b: &ChatBody,
-) -> Response {
-    let opts = ChatOptions {
-        model: model_name.to_string(),
-        temperature: b.temperature,
-        max_tokens: b.max_tokens,
-        json_mode: false,
-    };
-    match provider.chat(history, &opts).await {
-        Ok(r) => {
-            if let Ok(store) = s.chat.lock() {
-                let _ = store.add_message(session_id, "assistant", &r.text);
-                let _ = store.touch_session(session_id, provider.name(), Some(&r.model));
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "reply": r.text, "model": r.model,
-                    "provider": provider.name(), "session_id": session_id,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => chat_error(provider.name(), model_name, &e),
     }
 }
 
@@ -644,33 +552,9 @@ pub struct RunBody {
     pub lang: Option<String>,
 }
 
-/// Agentic run: the model reasons with tools (see harness/) until done.
-/// Persists like chat; every mutating tool call becomes an Action row, so
-/// the left pane shows real executions with live statuses.
-/// A Zen model called on the wrong endpoint answers 404 with an HTML page
-/// (gpt-* lives on /responses, claude-* on /messages). Translate that into
-/// guidance instead of leaking page soup to the chat.
-fn chat_error(provider: &str, model: &str, e: &ProviderError) -> Response {
-    if provider == "opencode" {
-        if let ProviderError::Status(404, body) = e {
-            if body.contains("<!DOCTYPE") || body.contains("<html") {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": {
-                            "code": "wrong_endpoint",
-                            "message": format!(
-                                "model '{model}' does not answer on chat completions — pick a chat model (e.g. big-pickle, kimi-k2.5, glm-5) in Settings → AI model"
-                            ),
-                        }
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }
-    error_response(e)
-}
+/// Agentic run: pi reasons with tools (Rust executes, policy-gated) until
+/// done. Persists like chat; every mutating tool call becomes an Action
+/// row, so the left pane shows real executions with live statuses.
 
 /// A first-use `ollama pull` failed: name the installed models so the UI (or
 /// the user in Settings → AI model) can pick something that answers now.
@@ -781,7 +665,7 @@ pub async fn run(
     // without it). The provider forwards it as `x-opencode-session`.
     provider.set_session_id(Some(session_id.clone()));
 
-    let history: Vec<LlmMessage> = {
+    {
         let store = match lock_chat(&s) {
             Ok(g) => g,
             Err(r) => return r,
@@ -789,153 +673,40 @@ pub async fn run(
         if store.add_message(&session_id, "user", &message).is_err() {
             return internal();
         }
-        history_for_model(store.list_messages(&session_id).unwrap_or_default())
-    };
+    }
 
-    // Fresh context every run: the model reasons with current facts.
-    let ctx = crate::harness::context::gather();
     let lang = b
         .lang
         .as_deref()
         .filter(|l| !l.trim().is_empty())
         .unwrap_or("es");
-    let system = crate::harness::prompt::system_prompt(&ctx, lang);
-    let sink = DbActionSink {
-        chat: s.chat.clone(),
-        session_id: session_id.clone(),
-        user_id: uid.clone(),
-    };
-    let policy = crate::harness::exec::Policy::from_env();
-    // Context meter for the UI badge: rough sent-tokens (chars/4) of system
-    // + history + tool schemas for the first agent turn.
-    let schema_chars: usize = crate::harness::tools::openai_schemas()
-        .iter()
-        .map(|v| v.to_string().len())
-        .sum();
-    let sent_chars =
-        system.len() + history.iter().map(|m| m.content.len()).sum::<usize>() + schema_chars;
-    let ctx_used = (sent_chars / 4) as u32;
     let ctx_window = provider.context_window();
-    // Pi harness (Phase 1, PI_HARNESS=1): identical contract, pi reasons.
-    if crate::pi::enabled() {
-        let done = match pi_chat_turn(
-            &s, &uid, &session_id, &prov_name, &model, &message, lang,
-        )
-        .await
-        {
-            Ok(d) => d,
-            Err(r) => return r,
-        };
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "reply": done.reply, "model": model, "provider": provider.name(),
-                "session_id": session_id, "steps": done.steps,
-                "context": { "used_tokens": done.used_tokens, "window": done.window.or(ctx_window) },
-            })),
-        )
-            .into_response();
-    }
-    let (reply, trace, tool_turns) = match crate::harness::agent::run_loop(
-        &provider, &model, history, &system, &sink, &policy, 6,
+    let done = match pi_chat_turn(
+        &s, &uid, &session_id, &prov_name, &model, &message, lang,
     )
     .await
     {
-        Ok(v) => v,
-        Err(e) => return chat_error(provider.name(), &model, &e),
+        Ok(d) => d,
+        Err(r) => return r,
     };
-
-    {
-        let store = match lock_chat(&s) {
-            Ok(g) => g,
-            Err(r) => return r,
-        };
-        // Persist tool turns (role "tool") BEFORE the final reply so the next
-        // run sees what was actually executed — this is what stops the model
-        // from confabulating past actions as current ones.
-        for turn in &tool_turns {
-            if store
-                .add_message(&session_id, "tool", &turn.content)
-                .is_err()
-            {
-                return internal();
-            }
-        }
-        if store.add_message(&session_id, "assistant", &reply).is_err() {
-            return internal();
-        }
-        let _ = store.touch_session(&session_id, provider.name(), Some(&model));
-    }
-    let run_line = format!(
-        "[run] session={} provider={} model={} steps={} calls={:?}",
-        session_id.chars().take(8).collect::<String>(),
-        provider.name(),
-        model,
-        trace.len(),
-        trace
-            .iter()
-            .map(|t| {
-                let args: String = t.args.to_string().chars().take(80).collect();
-                format!("{}:{}:{}", t.tool, t.ok, args)
-            })
-            .collect::<Vec<_>>(),
-    );
-    // Mirror into the in-app ring buffer: stderr is invisible when
-    // Electron spawns the sidecar, so Ajustes → Diagnóstico reads this.
-    eprintln!("{run_line}");
-    crate::diagnostics::push(run_line);
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "reply": reply, "model": model, "provider": provider.name(),
-            "session_id": session_id, "steps": trace,
-            "context": { "used_tokens": ctx_used, "window": ctx_window },
+            "reply": done.reply, "model": model, "provider": provider.name(),
+            "session_id": session_id, "steps": done.steps,
+            "context": { "used_tokens": done.used_tokens, "window": done.window.or(ctx_window) },
         })),
     )
         .into_response()
 }
 
-struct DbActionSink {
-    chat: Arc<Mutex<ChatStore>>,
-    session_id: String,
-    user_id: String,
-}
-impl crate::harness::agent::ActionSink for DbActionSink {
-    fn action_started(&self, kind: &str, title: &str) -> Option<String> {
-        // Single source of truth: the catalog decides what becomes an Action.
-        let records = crate::harness::tools::catalog()
-            .iter()
-            .find(|t| t.name == kind)
-            .is_some_and(|t| t.records_action);
-        if !records {
-            return None; // read-only tools stay in the trace only
-        }
-        self.chat
-            .lock()
-            .ok()?
-            .create_action(Some(&self.session_id), &self.user_id, kind, title)
-            .ok()
-            .map(|a| a.id)
-    }
-
-    fn action_finished(&self, action_id: &str, ok: bool) {
-        if let Ok(store) = self.chat.lock() {
-            let _ = store.set_action_status_owned(
-                action_id,
-                &self.user_id,
-                if ok { "done" } else { "failed" },
-            );
-        }
-    }
-}
-
-/// pi harness turn shared by `run` and `chat` (unified: every turn may act).
+/// Turn shared by `run` and `chat` (unified: every turn may act).
 /// Caller persists the user message first; this persists tool turns +
 /// assistant reply, touches the session, logs the run line, and returns the
-/// display payload. Identical HTTP shape to the native loop.
+/// display payload.
 struct PiTurnDone {
     reply: String,
-    steps: Vec<crate::harness::agent::TraceStep>,
+    steps: Vec<crate::harness::tools::TraceStep>,
     used_tokens: u32,
     window: Option<u32>,
 }
@@ -944,6 +715,7 @@ fn pi_error(e: &crate::pi::supervisor::PiError) -> Response {
     use crate::pi::supervisor::PiError as E;
     let (status, code, message) = match e {
         E::Timeout => (504u16, "timeout", e.message()),
+        E::Cancelled => (499u16, "cancelled", e.message()),
         E::Unavailable(_) => (500u16, "misconfigured", e.message()),
         E::Rpc(_) | E::TurnFailed(_) => (502u16, "ai_upstream", e.message()),
     };
@@ -988,7 +760,7 @@ async fn pi_chat_turn(
         "{}\n\n{}\n{}",
         crate::harness::prompt::turn_context(&ctx, lang),
         message,
-        crate::harness::agent::TURN_REMINDER,
+        crate::harness::prompt::TURN_REMINDER,
     );
     let est_used = ((full_message.len() + schema_chars) / 4) as u32;
     let title: String = match lock_chat(s) {
@@ -1089,12 +861,9 @@ pub async fn save_key(
         Err(e) => return error_response(&e),
     };
     if !probe.requires_key() {
-        // Pi harness: providers pi manages itself (user's own pi auth) can't
-        // take keys through us — but only when they aren't local providers,
-        // which genuinely need no key at all.
-        if crate::pi::enabled()
-            && !crate::pi::providers::is_local_provider(&b.provider)
-        {
+        // Providers pi manages itself (the user's own pi auth) can't take
+        // keys through us — but local providers genuinely need no key.
+        if !crate::pi::providers::is_local_provider(&b.provider) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -1209,9 +978,7 @@ pub async fn delete_key(
     if !probe.requires_key() {
         // Same pi-auth explanation as save_key (this one takes `provider`
         // from the path instead of the body).
-        if crate::pi::enabled()
-            && !crate::pi::providers::is_local_provider(&provider)
-        {
+        if !crate::pi::providers::is_local_provider(&provider) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -1241,6 +1008,21 @@ pub async fn delete_key(
     }
 }
 
+/// Flag the in-flight turn for cancellation. Always ok (idempotent):
+/// with no turn running it's a no-op. The renderer aborts its own HTTP
+/// request too; this frees the server side (per-user turn lock).
+pub async fn cancel_turn(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+) -> impl IntoResponse {
+    s.pi.request_cancel(&uid).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
 /// Key presence per keyed provider (never the keys themselves).
 pub async fn key_status(
     State(_s): State<AppState>,
@@ -1253,49 +1035,4 @@ pub async fn key_status(
         })
         .collect();
     (StatusCode::OK, Json(serde_json::json!({ "keys": list }))).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chat::model::ChatMessageRow;
-
-    fn row(id: &str, role: &str, content: String) -> ChatMessageRow {
-        ChatMessageRow {
-            id: id.into(),
-            role: role.into(),
-            content,
-            created_at: "2026-01-01T00:00:00Z".into(),
-        }
-    }
-
-    #[test]
-    fn history_slims_long_noisy_turns() {
-        let mut rows = vec![];
-        for i in 0..15 {
-            rows.push(row(&format!("m{i}"), "user", format!("hello {i}")));
-        }
-        rows.push(row("t", "tool", "x".repeat(2000)));
-        rows.push(row("u", "user", "go".into()));
-        let h = history_for_model(rows);
-        // Capped, tool blob truncated, newest turn always kept.
-        assert!(h.len() <= 12);
-        assert_eq!(h.last().unwrap().content, "go");
-        let tool = h.iter().find(|m| matches!(m.role, Role::Tool)).unwrap();
-        assert!(tool.content.ends_with("[truncated]"));
-        assert!(tool.content.len() <= 420);
-        assert!(h.iter().any(|m| matches!(m.role, Role::User)));
-    }
-
-    #[test]
-    fn history_keeps_tiny_sessions_intact() {
-        let rows = vec![
-            row("a", "user", "hi".into()),
-            row("b", "assistant", "hello".into()),
-        ];
-        let h = history_for_model(rows);
-        assert_eq!(h.len(), 2);
-        assert!(matches!(h[0].role, Role::User));
-        assert!(matches!(h[1].role, Role::Assistant));
-    }
 }

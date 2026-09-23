@@ -2,7 +2,7 @@
 //! needed for local mic access); transcripts are *not* persisted here — the
 //! renderer feeds them into the authed agent endpoint itself.
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
@@ -148,4 +148,30 @@ pub async fn speak(
 pub async fn speak_stop(State(s): State<AppState>) -> impl IntoResponse {
     s.tts.stop();
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// Uninstall a downloaded whisper model (`tiny|tiny.en|base|base.en|small`).
+/// Idempotent: a missing file still answers ok (removed=false). The next
+/// listen re-downloads on demand, so uninstalling the active model only
+/// costs one download, never an error.
+pub async fn delete_model(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let name = name.trim().to_string();
+    if super::model::spec(&name).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "invalid_model", "message": "unknown voice model (try tiny|tiny.en|base|base.en|small)" }
+            })),
+        )
+            .into_response();
+    }
+    let removed = super::model::remove_downloaded(&s.voice.models_dir(), &name);
+    crate::diagnostics::push(format!(
+        "voice: model {name} uninstalled{}",
+        if removed { "" } else { " (was already gone)" }
+    ));
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true, "removed": removed }))).into_response()
 }

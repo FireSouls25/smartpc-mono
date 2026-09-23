@@ -24,6 +24,7 @@ export const en: Record<I18nKey, string> = {
   "orb.thinking": "Thinking",
   "chat.placeholder": "Ask your PC for something…",
   "chat.send": "Send",
+  "chat.stop": "Stop",
   "chat.provider": "Provider",
   "chat.model": "Model",
   "chat.hello": "Hi, what shall we do today?",
@@ -43,6 +44,8 @@ export const en: Record<I18nKey, string> = {
   "voice.modeWake": "Wake word: always listening",
   "voice.modeConvo": "Conversation: continuous talk",
   "voice.convoLimit": "Conversation ended (turn limit).",
+  "voice.convoEmpty":
+    "No speech detected; check the microphone or sensitivity.",
   "voice.speakFailed": "Could not play the reply; conversation stopped.",
   "voice.wakeWord": "Wake word",
   "voice.wakeHint":
@@ -65,6 +68,12 @@ export const en: Record<I18nKey, string> = {
   "voice.hotkeyHint": "Toggles the microphone from anywhere.",
   "voice.osGain": "OS volume",
   "voice.muted": "muted",
+  "voice.models": "Installed models",
+  "voice.downloaded": "Downloaded",
+  "voice.notDownloaded": "Not downloaded",
+  "voice.deleteModel": "Delete",
+  "voice.deleteAsk":
+    "Delete model {name} (~{size} MB)? It re-downloads on next use.",
   "voice.pressKeys": "Press the combination…",
   "voice.hotkeyReset": "Reset",
   "voice.ready": "Ready",

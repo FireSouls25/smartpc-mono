@@ -56,6 +56,9 @@ pub enum PiError {
     Rpc(String),
     Timeout,
     TurnFailed(String),
+    /// The user cancelled the turn (Detener button). Not a failure: the
+    /// renderer already moved on; the loop just needed unwinding.
+    Cancelled,
 }
 
 impl PiError {
@@ -65,6 +68,7 @@ impl PiError {
             Self::Rpc(e) => e.clone(),
             Self::Timeout => "pi did not answer in time".to_string(),
             Self::TurnFailed(e) => e.clone(),
+            Self::Cancelled => "turn cancelled".to_string(),
         }
     }
 }
@@ -77,6 +81,10 @@ pub(crate) struct ChildHandle {
     turn_lock: AsyncMutex<()>,
     catalog: AsyncMutex<(Option<Instant>, Vec<Value>)>,
     exited: AtomicBool,
+    /// Set by the cancel endpoint, consumed by the turn loop: the next
+    /// event-loop tick aborts pi and unwinds, freeing the per-user turn
+    /// lock so the follow-up send doesn't queue behind a dead turn.
+    cancel: AtomicBool,
     /// pi session file → turn context. Files are stable across restarts, so
     /// entries outlive turns; re-inserted (overwritten) every turn.
     sessions: Mutex<HashMap<String, TurnContext>>,
@@ -228,6 +236,7 @@ impl PiSupervisor {
             catalog: AsyncMutex::new((None, Vec::new())),
             sessions: Mutex::new(HashMap::new()),
             exited: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
         });
         Self::spawn_reader(handle.clone(), stdout, event_tx);
         crate::diagnostics::push(format!(
@@ -367,6 +376,16 @@ impl PiSupervisor {
         }
     }
 
+    /// Flag the in-flight turn (if any) for cancellation. Idempotent:
+    /// no child or no turn still answers ok. The turn loop aborts pi and
+    /// unwinds on its next tick, freeing the per-user turn lock.
+    pub async fn request_cancel(&self, user_id: &str) {
+        if let Some(h) = self.children.lock().await.get(user_id) {
+            h.cancel.store(true, Ordering::SeqCst);
+            crate::diagnostics::push("pi: turn cancel requested".to_string());
+        }
+    }
+
     /// Register a pi session file → turn context (called per turn, after
     /// ensure/switch). Files are stable, so entries persist and are simply
     /// overwritten by later turns.
@@ -395,6 +414,11 @@ impl PiSupervisor {
 }
 
 impl ChildHandle {
+    /// Consume a pending cancel request (if any).
+    pub(crate) fn take_cancel(&self) -> bool {
+        self.cancel.swap(false, Ordering::SeqCst)
+    }
+
     /// Send one command, await its correlated response (caller picks timeout).
     pub async fn command(
         &self,

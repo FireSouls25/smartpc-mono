@@ -33,10 +33,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       // Cold `cargo run` compiles the sidecar first: be generous.
       timeout: 600000,
-      env: {
-        // PI_HARNESS=1 runs the suite against the pi backend instead.
-        PI_HARNESS: process.env.PI_HARNESS ?? "0",
-      },
+      env: {},
     },
     {
       command: `npx vite --port ${APP_PORT} --host 127.0.0.1 --strictPort`,

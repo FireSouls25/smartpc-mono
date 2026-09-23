@@ -50,6 +50,15 @@ pub fn model_ready(dir: &Path, name: &str) -> bool {
     model_path(dir, name).is_some_and(|p| p.is_file())
 }
 
+/// Delete a downloaded model file. True when a file was actually removed
+/// (missing file = false, never an error: uninstall is idempotent).
+pub fn remove_downloaded(dir: &Path, name: &str) -> bool {
+    match model_path(dir, name) {
+        Some(p) => std::fs::remove_file(p).is_ok(),
+        None => false,
+    }
+}
+
 /// Blocking download (run it in `spawn_blocking`). Streams to `<file>.part`,
 /// renames on success, cleans up on failure. Progress lines are throttled.
 pub async fn ensure_downloaded(dir: &Path, name: &str) -> Result<PathBuf, String> {
@@ -139,5 +148,23 @@ mod tests {
         );
         assert_eq!(model_path(dir, "nope"), None);
         assert!(!model_ready(dir, "tiny"));
+    }
+
+    #[test]
+    fn uninstall_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "smartpc-modeltest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Unknown names never touch disk.
+        assert!(!remove_downloaded(&dir, "medium"));
+        // Missing file is a clean false, never an error.
+        assert!(!remove_downloaded(&dir, "tiny"));
+        std::fs::write(dir.join("ggml-tiny.bin"), b"fake").unwrap();
+        assert!(model_ready(&dir, "tiny"));
+        assert!(remove_downloaded(&dir, "tiny"));
+        assert!(!model_ready(&dir, "tiny"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
