@@ -25,7 +25,12 @@ fn stamp() -> String {
 }
 
 /// Record one line. Never panics, never grows past [`CAP`].
+/// Lines also go to stderr: under `npm run dev:electron` the sidecar's
+/// stderr is inherited by the terminal, so `tail` there replaces the
+/// Settings → Diagnóstico round-trip during development. The endpoint
+/// stays for packaged/GUI launches, where no terminal exists.
 pub fn push(line: String) {
+    eprintln!("{line}");
     if let Ok(mut log) = LOG.lock() {
         if log.len() >= CAP {
             log.pop_front();

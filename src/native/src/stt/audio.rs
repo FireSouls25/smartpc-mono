@@ -58,6 +58,56 @@ pub fn list_input_devices() -> Vec<String> {
         .collect()
 }
 
+/// OS mixer level for the capture path, when the platform exposes one.
+///
+/// Read-only by design: the app never changes OS gain itself (that would
+/// surprise), it only reports it — a mic at 33 % buries speech under any
+/// VAD threshold, and without this the diagnostics just say "too quiet".
+/// Linux reads PipeWire (`wpctl`); other platforms return `None`
+/// (macOS/Windows give no stable CLI for input gain).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MixerState {
+    /// 0.0–1.0+ (PipeWire allows >100 %).
+    pub volume: f32,
+    pub muted: bool,
+}
+
+pub fn mixer_state() -> Option<MixerState> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_mixer_state()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mixer_state() -> Option<MixerState> {
+    // `timeout` guards a hung sound server; failure (no wpctl, no PipeWire)
+    // is absence, not error — the picker/diagnostics carry on regardless.
+    let out = std::process::Command::new("timeout")
+        .args(["5", "wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // "Volume: 0.33" or "Volume: 0.33 [MUTED]".
+    let (volume, muted) = parse_wpctl_volume(&String::from_utf8_lossy(&out.stdout))?;
+    Some(MixerState { volume, muted })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_wpctl_volume(text: &str) -> Option<(f32, bool)> {
+    let rest = text.trim().strip_prefix("Volume:")?.trim();
+    let (level, muted) = match rest.split_once(' ') {
+        Some((v, flag)) => (v, flag.contains("MUTED")),
+        None => (rest, false),
+    };
+    Some((level.parse().ok()?, muted))
+}
 /// What the opened stream actually runs at (logged: sample-rate surprises
 /// are a classic "VAD hears nothing useful" cause).
 #[derive(Debug, Clone)]
@@ -452,5 +502,18 @@ mod tests {
         assert!(is_sink_name("HDMI monitor"));
         assert!(!is_sink_name("PipeWire Sound Server"));
         assert!(!is_sink_name("sof-hda-dsp, "));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wpctl_volume_parses_levels_and_mute() {
+        assert_eq!(parse_wpctl_volume("Volume: 0.33\n"), Some((0.33, false)));
+        assert_eq!(
+            parse_wpctl_volume("Volume: 1.00 [MUTED]\n"),
+            Some((1.0, true))
+        );
+        assert_eq!(parse_wpctl_volume("Volume: 1.50\n"), Some((1.5, false)));
+        assert_eq!(parse_wpctl_volume("nonsense"), None);
+        assert_eq!(parse_wpctl_volume(""), None);
     }
 }

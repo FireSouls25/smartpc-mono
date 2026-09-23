@@ -34,6 +34,24 @@ Both modes are also driven by the push-to-talk shortcut (default
 `Ctrl+M`, changeable in Settings → Voice): it toggles the mic from
 anywhere, and the mic button tooltip always names the current key.
 
+## Conversation mode (continuous talk)
+
+A third mode, `conversation`, loops single utterances without further
+presses: listen → agent → TTS reply → listen again (half-duplex —
+there is no echo cancellation in this stack, so turns stay strictly
+sequential: talk, hear the reply, talk). Details:
+
+- TTS is first-class here: replies are always spoken, independent of the
+  read-aloud toggle (normal manual/wake mode stays mute unless opted in).
+- Echo guard: a transcript matching the just-spoken reply (speaker bleed
+  into the mic) is dropped and the loop resumes instead of answering
+  itself. Short overlaps (< 12 chars) never count.
+- Barge-in is the toggle/hotkey: it cuts speech AND ends the loop.
+- Safety rails: 30 turns max, agent-busy parks words in the composer and
+  ends the loop, TTS failure stops honestly instead of looping mute.
+- Backend `conversation` behaves like `manual` per turn (one utterance →
+  transcript → end); the renderer owns the chaining.
+
 Wake detection is textual, not acoustic: VAD-gated onsets are transcribed
 with tiny and split into match + remainder (`split_wake_command`).
 Whole-word for single words ("they" ≠ "hey"; "¡Hey!" = "hey"), substring

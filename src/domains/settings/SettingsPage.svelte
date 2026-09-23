@@ -459,11 +459,25 @@
               ></span>
               {t("voice.model")}: {effectiveStt().name}
             </span>
+            {#if voiceStatus?.mixer}
+              <span class="chip">
+                <span
+                  class="dot"
+                  style="background: {voiceStatus.mixer.muted ||
+                  voiceStatus.mixer.volume < 0.5
+                    ? 'var(--warn)'
+                    : 'var(--success)'};"
+                ></span>
+                {t("voice.osGain")}: {voiceStatus.mixer.muted
+                  ? t("voice.muted")
+                  : `${Math.round(voiceStatus.mixer.volume * 100)} %`}
+              </span>
+            {/if}
           </div>
           <div>
             <p class="label">{t("voice.mode")}</p>
             <div class="flex flex-wrap gap-2">
-              {#each ["manual", "wake"] as VoiceMode[] as v (v)}
+              {#each ["manual", "wake", "conversation"] as VoiceMode[] as v (v)}
                 <button
                   class="chip"
                   style={voice.mode === v
@@ -472,7 +486,11 @@
                   onclick={() => voice.setMode(v)}
                   aria-pressed={voice.mode === v}
                 >
-                  {v === "manual" ? t("voice.modeManual") : t("voice.modeWake")}
+                  {v === "manual"
+                    ? t("voice.modeManual")
+                    : v === "wake"
+                      ? t("voice.modeWake")
+                      : t("voice.modeConvo")}
                 </button>
               {/each}
             </div>

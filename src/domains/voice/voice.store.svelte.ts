@@ -34,7 +34,8 @@ export const SENSITIVITY_THRESHOLD: Record<VoiceSensitivity, number | null> = {
 
 function loadMode(): VoiceMode {
   try {
-    return window.localStorage.getItem(MODE_KEY) === "wake" ? "wake" : "manual";
+    const v = window.localStorage.getItem(MODE_KEY);
+    return v === "wake" || v === "conversation" ? v : "manual";
   } catch {
     return "manual";
   }
@@ -259,6 +260,10 @@ async function handle(ev: VoiceEvent): Promise<void> {
 async function onTranscript(text: string): Promise<void> {
   const clean = text.trim();
   if (!clean) return;
+  if (conversationActive) {
+    await onConversationTranscript(clean);
+    return;
+  }
   const dispatched = await chat.send(clean);
   if (!dispatched) {
     // Agent busy: keep the words in the composer instead of losing them.
@@ -267,7 +272,99 @@ async function onTranscript(text: string): Promise<void> {
   }
 }
 
+/* Continuous conversation (half-duplex ChatGPT-voice-style loop):
+ * listen → send → reply → speak → listen again. No echo cancellation in
+ * this stack, so turns are strictly sequential and the speaker's own
+ * reply is echo-guarded (dropped, loop resumes) instead of answered.
+ * Barge-in is the toggle/hotkey: it cuts speech AND ends the loop. */
+
+const CONVO_MAX_TURNS = 30;
+const CONVO_NEXT_PAUSE_MS = 800;
+
+let conversationActive = $state(false);
+let convoTurns = 0;
+let convoTimer: number | null = null;
+let lastSpokenNorm = "";
+
+function normEcho(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9áéíóúñü ]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The mic heard our own TTS (speaker bleed): short overlaps don't count. */
+function isEchoSpoken(text: string): boolean {
+  const n = normEcho(text);
+  if (n.length < 12 || !lastSpokenNorm) return false;
+  return lastSpokenNorm.includes(n) || n.includes(lastSpokenNorm);
+}
+
+function clearConvoTimer(): void {
+  if (convoTimer !== null) {
+    window.clearTimeout(convoTimer);
+    convoTimer = null;
+  }
+}
+
+function stopConversation(): void {
+  conversationActive = false;
+  clearConvoTimer();
+}
+
+function scheduleNextTurn(): void {
+  if (!conversationActive) return;
+  clearConvoTimer();
+  convoTimer = window.setTimeout(() => {
+    convoTimer = null;
+    if (!conversationActive) return;
+    if (convoTurns >= CONVO_MAX_TURNS) {
+      error = t("voice.convoLimit");
+      void stopAll();
+      return;
+    }
+    void start();
+  }, CONVO_NEXT_PAUSE_MS);
+}
+
+function startConversation(): void {
+  if (
+    phase === "starting" ||
+    phase === "listening" ||
+    phase === "capturing" ||
+    conversationActive
+  ) {
+    return;
+  }
+  setMode("conversation");
+  conversationActive = true;
+  convoTurns = 0;
+  error = "";
+  void start();
+}
+
+async function onConversationTranscript(clean: string): Promise<void> {
+  convoTurns++;
+  if (isEchoSpoken(clean)) {
+    // Own reply through the speakers: ignore, keep listening.
+    scheduleNextTurn();
+    return;
+  }
+  const dispatched = await chat.send(clean);
+  if (!dispatched) {
+    // Agent busy mid-loop: park the words, end the loop (no pile-up).
+    chat.setDraft(clean);
+    error = t("voice.busy");
+    void stopAll();
+    return;
+  }
+  // The reply arrives via onAssistantReply → forced speak → next turn is
+  // scheduled when speech ends. Nothing to do here but wait.
+}
+
 async function stop(): Promise<void> {
+  stopConversation();
   run++;
   setNotice("");
   const wasActive =
@@ -284,11 +381,27 @@ async function stop(): Promise<void> {
 }
 
 function toggle(): void {
-  if (phase === "starting" || phase === "listening" || phase === "capturing") {
-    void stop();
+  if (
+    phase === "starting" ||
+    phase === "listening" ||
+    phase === "capturing" ||
+    conversationActive ||
+    speaking
+  ) {
+    // Barge-in: cuts speech AND ends the loop (conversation included).
+    void stopAll();
+  } else if (mode === "conversation") {
+    startConversation();
   } else {
     void start();
   }
+}
+
+/** Full stop: loop flag, speech, session. */
+async function stopAll(): Promise<void> {
+  stopConversation();
+  await stopSpeaking();
+  await stop();
 }
 
 function setMode(m: VoiceMode): void {
@@ -401,11 +514,14 @@ let replyUnsub: (() => void) | null = null;
 
 /** Speak fresh replies (never history loads — see onAssistantReply). */
 function ensureReplySub(): void {
-  if (!speakEnabled || replyUnsub) return;
+  if (replyUnsub) return;
   replyUnsub = onAssistantReply((id, text) => {
-    if (!speakEnabled || !id || !text?.trim()) return;
+    if (!id || !text?.trim()) return;
     if (id === lastSpokenId) return;
     lastSpokenId = id;
+    // Conversation mode is TTS-first-class (always spoken); normal mode
+    // stays mute unless the speak toggle opted in.
+    if (!conversationActive && !speakEnabled) return;
     void speakText(text);
   });
 }
@@ -424,6 +540,7 @@ async function speakText(text: string): Promise<void> {
   const clean = text.trim().slice(0, 2000);
   if (!clean) return;
   clearSpeakTimer();
+  lastSpokenNorm = normEcho(clean);
   try {
     const res = await voiceApi.speak(clean, getLang());
     speaking = true;
@@ -431,11 +548,19 @@ async function speakText(text: string): Promise<void> {
       () => {
         speaking = false;
         speakTimer = null;
+        // Conversation turn-taking: speech "end" is the watchdog estimate
+        // (the server emits no completion events by design).
+        if (conversationActive) scheduleNextTurn();
       },
       Math.min(res.estimated_ms + 5000, 250000),
     );
   } catch {
     speaking = false;
+    if (conversationActive) {
+      // Conversation needs voice: degrade honestly instead of looping mute.
+      error = t("voice.speakFailed");
+      void stopAll();
+    }
   }
 }
 
@@ -488,6 +613,9 @@ export const voice = {
   },
   get capturing(): boolean {
     return phase === "capturing";
+  },
+  get conversationActive(): boolean {
+    return conversationActive;
   },
   start,
   stop,

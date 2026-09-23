@@ -1,6 +1,6 @@
 import { api } from "../../lib/api";
 
-export type VoiceMode = "manual" | "wake";
+export type VoiceMode = "manual" | "wake" | "conversation";
 
 export interface VoiceStatus {
   listening: boolean;
@@ -14,6 +14,8 @@ export interface VoiceStatus {
   model_ready: boolean;
   /** Per-model whisper download state (see stt/model.rs ALL_MODELS). */
   models_ready: Record<string, boolean>;
+  /** OS capture gain, when the platform exposes it (Linux only for now). */
+  mixer: { volume: number; muted: boolean } | null;
 }
 
 export type VoiceEvent =

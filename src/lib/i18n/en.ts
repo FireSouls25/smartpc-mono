@@ -41,6 +41,9 @@ export const en: Record<I18nKey, string> = {
   "voice.mode": "Mode",
   "voice.modeManual": "Manual: press to talk",
   "voice.modeWake": "Wake word: always listening",
+  "voice.modeConvo": "Conversation: continuous talk",
+  "voice.convoLimit": "Conversation ended (turn limit).",
+  "voice.speakFailed": "Could not play the reply; conversation stopped.",
   "voice.wakeWord": "Wake word",
   "voice.wakeHint":
     "Starts recording when heard. Everything stays on this machine.",
@@ -60,6 +63,8 @@ export const en: Record<I18nKey, string> = {
     "If you talk and nothing triggers, raise to High. Diagnostics shows your level (rms) vs the threshold.",
   "voice.hotkey": "Push-to-talk key",
   "voice.hotkeyHint": "Toggles the microphone from anywhere.",
+  "voice.osGain": "OS volume",
+  "voice.muted": "muted",
   "voice.pressKeys": "Press the combination…",
   "voice.hotkeyReset": "Reset",
   "voice.ready": "Ready",

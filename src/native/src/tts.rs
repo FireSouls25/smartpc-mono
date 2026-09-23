@@ -98,8 +98,13 @@ impl TtsManager {
             inner.generation += 1;
             inner.generation
         };
+        let model = tts_model_for_lang(lang);
+        crate::diagnostics::push(format!(
+            "tts: speaking {} chars (lang={lang}, model={model})",
+            clean.chars().count()
+        ));
         let home = self.data_dir.join("pi").join("tts-home");
-        write_tts_config(&home, lang, tts_model_for_lang(lang))?;
+        write_tts_config(&home, lang, model)?;
         let (bin, mut args) = crate::pi::supervisor::PiSupervisor::pi_command();
         args.extend([
             "--mode".to_string(),
@@ -178,6 +183,7 @@ impl TtsManager {
             if let Some(mut c) = taken {
                 let _ = c.start_kill();
                 let _ = c.wait().await;
+                crate::diagnostics::push("tts: player reaped by watchdog".to_string());
             }
         });
         Ok(estimated)
@@ -185,7 +191,15 @@ impl TtsManager {
 
     /// Cut active speech immediately. Idempotent.
     pub fn stop(&self) {
+        let had_child = self
+            .inner
+            .lock()
+            .map(|g| g.child.is_some())
+            .unwrap_or(false);
         self.stop_inner();
+        if had_child {
+            crate::diagnostics::push("tts: stopped".to_string());
+        }
     }
 
     fn stop_inner(&self) {

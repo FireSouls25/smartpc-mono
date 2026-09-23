@@ -41,7 +41,9 @@
   const micTitle = () =>
     voice.mode === "wake"
       ? `${t("voice.modeWake")} («${voice.wakeWord}») · ${displayHotkey(voice.hotkey)}`
-      : `${t("voice.modeManual")} · ${displayHotkey(voice.hotkey)}`;
+      : voice.mode === "conversation"
+        ? `${t("voice.modeConvo")} · ${displayHotkey(voice.hotkey)}`
+        : `${t("voice.modeManual")} · ${displayHotkey(voice.hotkey)}`;
 </script>
 
 <div class="flex h-full min-h-0 flex-1 flex-col gap-4">

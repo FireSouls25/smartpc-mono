@@ -31,6 +31,11 @@ use super::wake::split_wake_command;
 pub enum ListenMode {
     Manual,
     Wake,
+    /// Client-looped continuous talk: backend behaves like manual (one
+    /// utterance → transcript → end); the renderer chains turns, TTS
+    /// replies, and echo guards. Half-duplex by design (no echo
+    /// cancellation in this stack): talk, hear the reply, talk again.
+    Conversation,
 }
 
 impl ListenMode {
@@ -38,6 +43,7 @@ impl ListenMode {
         match raw.trim().to_lowercase().as_str() {
             "manual" => Some(Self::Manual),
             "wake" => Some(Self::Wake),
+            "conversation" => Some(Self::Conversation),
             _ => None,
         }
     }
@@ -46,6 +52,7 @@ impl ListenMode {
         match self {
             Self::Manual => "manual",
             Self::Wake => "wake",
+            Self::Conversation => "conversation",
         }
     }
 }
@@ -256,6 +263,7 @@ impl VoiceService {
             "inputs": audio::list_input_devices(),
             "model_ready": model::model_ready(&self.models_dir, &model),
             "models_ready": models_ready,
+            "mixer": audio::mixer_state(),
         })
     }
 
@@ -294,6 +302,18 @@ impl VoiceService {
         if !audio::microphone_present() {
             self.clear_session();
             return Err(StartError::NoMicrophone);
+        }
+        // OS gain triage up front: a mic at 33 % looks exactly like a dead
+        // mic downstream ("too quiet", best run 0) and no threshold fixes it.
+        match audio::mixer_state() {
+            Some(m) if m.muted => crate::diagnostics::push(
+                "voice: OS mic is MUTED (unmute it, then retry)".to_string(),
+            ),
+            Some(m) if m.volume < 0.5 => crate::diagnostics::push(format!(
+                "voice: OS mic gain is {}% — raise it (wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 1.0) or speech stays under the threshold",
+                (m.volume * 100.0).round()
+            )),
+            _ => {}
         }
         let model_path = match tokio_block_on(model::ensure_downloaded(
             &self.models_dir,
@@ -487,6 +507,13 @@ mod tests {
         let (code, status, _) = StartError::BadThreshold.http_parts();
         assert_eq!(code, 400);
         assert_eq!(status, "invalid_threshold");
+    }
+
+    #[test]
+    fn parse_opts_accepts_conversation_mode() {
+        let o = parse_opts(Some("conversation"), None, None, None, None, None).unwrap();
+        assert_eq!(o.mode, ListenMode::Conversation);
+        assert_eq!(ListenMode::Conversation.as_str(), "conversation");
     }
 
     #[test]
@@ -787,7 +814,9 @@ impl Listener {
         }
         crate::diagnostics::push(format!("voice: heard {}", preview(&text)));
         match self.opts.mode {
-            ListenMode::Manual => {
+            // Conversation ends the backend turn exactly like manual; the
+            // renderer owns the loop (next listen after the spoken reply).
+            ListenMode::Manual | ListenMode::Conversation => {
                 self.emit(VoiceEvent::Transcript { text });
                 // Single utterance per press: the frontend sends it and the
                 // session is done. Nobody presses anything to finish.

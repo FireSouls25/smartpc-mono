@@ -42,6 +42,10 @@ export const es = {
   "voice.mode": "Modo",
   "voice.modeManual": "Manual: pulsa para hablar",
   "voice.modeWake": "Palabra clave: escucha siempre",
+  "voice.modeConvo": "Conversación: habla continua",
+  "voice.convoLimit": "Conversación terminada (límite de turnos).",
+  "voice.speakFailed":
+    "No se pudo reproducir la respuesta; conversación detenida.",
   "voice.wakeWord": "Palabra de activación",
   "voice.wakeHint":
     "Empieza a grabar cuando la oye. Todo ocurre en este equipo.",
@@ -61,6 +65,8 @@ export const es = {
     "Si hablas y no te detecta, sube a Alta. El diagnóstico muestra tu nivel (rms) frente al umbral.",
   "voice.hotkey": "Tecla para hablar",
   "voice.hotkeyHint": "Alterna el micrófono desde cualquier parte.",
+  "voice.osGain": "Volumen del SO",
+  "voice.muted": "silenciado",
   "voice.pressKeys": "Pulsa la combinación…",
   "voice.hotkeyReset": "Restablecer",
   "voice.ready": "Listo",
