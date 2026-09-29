@@ -33,7 +33,13 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       // Cold `cargo run` compiles the sidecar first: be generous.
       timeout: 600000,
-      env: {},
+      env: {
+        // Isolate ambient developer pi auth (~/.pi/agent/auth.json): with a
+        // real opencode key present, the catalog reports needs_key=false and
+        // the no-key modal path (ai-keys.spec) can't trigger. Tests must not
+        // depend on who runs them.
+        PI_AUTH_FILE: "/dev/null",
+      },
     },
     {
       command: `npx vite --port ${APP_PORT} --host 127.0.0.1 --strictPort`,

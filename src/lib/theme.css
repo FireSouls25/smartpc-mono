@@ -217,10 +217,10 @@ body {
     box-shadow: 0 1px 2px rgb(17 17 20 / 0.06);
   }
   /* Per-pane whites: left slightly gray, center brightest, right in between. */
-  .pane-a .card-xl {
+  [data-testid="pane-a"] .card-xl {
     background: var(--surface);
   }
-  .pane-c .card-xl {
+  [data-testid="pane-c"] .card-xl {
     background: color-mix(in srgb, var(--surface) 55%, var(--bg));
   }
   .bubble-user {
@@ -347,13 +347,150 @@ body {
     max-height: 16rem;
     overflow-y: auto;
   }
-  /* Pane dividers (resizable main layout): quiet until hover/drag. */
+  /* Resizable row: side panes take --pw on lg+ (stacked below), the
+   * center always takes the remainder and never drops below 360px.
+   * Content can never paint outside its pane (the overlap backstop). */
+  .resizable-row {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 1rem;
+    min-height: 0;
+    padding-bottom: 1rem;
+  }
+  @media (min-width: 1024px) {
+    .resizable-row {
+      flex-direction: row;
+      gap: 0;
+      padding-bottom: 2rem;
+    }
+  }
+  .resizable-row.resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+  .pane {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+  }
+  @media (min-width: 1024px) {
+    .pane-side {
+      flex: 0 0 auto;
+      flex-basis: var(--pw);
+    }
+  }
+  .pane-center {
+    flex: 1 1 auto;
+    min-width: min(360px, 100%);
+  }
+  .pane-right,
+  .divider-right,
+  .rail-right {
+    display: none;
+  }
+  @media (min-width: 1280px) {
+    .pane-right,
+    .divider-right,
+    .rail-right {
+      display: flex;
+    }
+  }
+  /* Pane dividers: quiet until hover/drag. */
+  .divider {
+    display: none;
+    width: 0.75rem;
+    flex-shrink: 0;
+    cursor: col-resize;
+    touch-action: none;
+    align-items: stretch;
+    justify-content: center;
+  }
+  @media (min-width: 1024px) {
+    .divider {
+      display: flex;
+    }
+  }
   .divider span {
+    width: 0.25rem;
+    border-radius: 999px;
     background: var(--border);
     transition: background 0.15s ease;
   }
   .divider:hover span {
     background: var(--accent);
+  }
+  /* Collapse chevrons + slim rails. */
+  .pane-collapse {
+    position: absolute;
+    top: 0.75rem;
+    z-index: 5;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    height: 1.75rem;
+    width: 1.75rem;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  @media (min-width: 1024px) {
+    .pane-collapse {
+      display: inline-flex;
+    }
+  }
+  .pane-collapse:hover {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+  .pane-collapse svg {
+    height: 1rem;
+    width: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .pane-collapse.edge-right {
+    right: 0.5rem;
+  }
+  .pane-collapse.edge-left {
+    left: 0.5rem;
+  }
+  .rail {
+    display: none;
+    flex-shrink: 0;
+    width: 1.75rem;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 0.75rem;
+    background: transparent;
+    border: none;
+    color: var(--fg-faint);
+    cursor: pointer;
+  }
+  @media (min-width: 1024px) {
+    .rail {
+      display: flex;
+    }
+  }
+  .rail:hover {
+    color: var(--accent);
+  }
+  .rail svg {
+    height: 1rem;
+    width: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
   .switch {
     position: relative;

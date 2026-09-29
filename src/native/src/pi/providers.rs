@@ -21,10 +21,19 @@ fn home_config_dir() -> Option<std::path::PathBuf> {
 
 /// Does the user's own pi config already authenticate this provider?
 /// Best-effort presence check (key names only, values never read).
+/// `PI_AUTH_FILE` overrides the path (test hook: e2e isolates ambient
+/// developer auth so the no-key modal path is deterministic).
 pub fn pi_auth_has(provider: &str) -> bool {
-    let path = match home_config_dir() {
-        Some(h) => h.join(".pi").join("agent").join("auth.json"),
-        None => return false,
+    let path = match std::env::var("PI_AUTH_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from)
+    {
+        Some(p) => p,
+        None => match home_config_dir() {
+            Some(h) => h.join(".pi").join("agent").join("auth.json"),
+            None => return false,
+        },
     };
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -212,5 +221,29 @@ mod tests {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn auth_file_override_is_honored() {
+        let prev = std::env::var("PI_AUTH_FILE").ok();
+        // Unreadable path: no key, regardless of the real home config.
+        std::env::set_var("PI_AUTH_FILE", "/tmp/opencode-definitely-no-auth-xyz.json");
+        assert!(!pi_auth_has("opencode"));
+        // A file naming the provider authenticates it (values never read).
+        let dir = std::env::temp_dir().join(format!(
+            "smartpc-authtest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("auth.json");
+        std::fs::write(&file, r#"{"opencode": {"type": "api_key"}}"#).unwrap();
+        std::env::set_var("PI_AUTH_FILE", &file);
+        assert!(pi_auth_has("opencode"));
+        assert!(!pi_auth_has("anthropic"));
+        match prev {
+            Some(v) => std::env::set_var("PI_AUTH_FILE", v),
+            None => std::env::remove_var("PI_AUTH_FILE"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

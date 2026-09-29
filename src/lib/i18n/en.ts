@@ -15,6 +15,8 @@ export const en: Record<I18nKey, string> = {
   "auth.delete": "Delete account",
   "auth.deleteAsk": "Delete your account forever? This cannot be undone.",
   "common.loading": "Loading…",
+  "common.hide": "Hide",
+  "common.show": "Show",
   "common.theme": "Theme",
   "common.light": "Light",
   "common.dark": "Dark",

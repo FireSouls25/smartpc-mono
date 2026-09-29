@@ -15,6 +15,8 @@ export const es = {
   "auth.deleteAsk":
     "¿Eliminar tu cuenta para siempre? Esta acción no se puede deshacer.",
   "common.loading": "Cargando…",
+  "common.hide": "Ocultar",
+  "common.show": "Mostrar",
   "common.theme": "Tema",
   "common.light": "Claro",
   "common.dark": "Oscuro",

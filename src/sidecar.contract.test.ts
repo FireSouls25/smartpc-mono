@@ -229,7 +229,9 @@ describe("sidecar contract", () => {
       ).json()) as { listening: boolean };
       expect(st.listening).toBe(false);
     }
-  });
+    // First-use whisper download (~75 MB into a fresh temp dir) dwarfs the
+    // 5 s default timeout on slow links.
+  }, 120000);
 
   test("voice speak validates without side effects", async () => {
     const empty = await fetch(`${BASE}/v1/voice/speak`, {
