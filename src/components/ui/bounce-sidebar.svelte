@@ -132,7 +132,7 @@
   <span
     bind:this={dotEl}
     aria-hidden="true"
-    class="absolute left-2 top-0 rounded-full transition-opacity duration-150"
+    class="absolute left-2 top-0 transition-opacity duration-150"
     style="width: 6px; height: 6px; background-color: {dotColor}; opacity: {ready
       ? 1
       : 0}; transform: {dotY === null ? 'none' : `translate(0px, ${dotY}px)`};"
@@ -154,7 +154,7 @@
       {@const href = hrefOf(item)}
       {@const isActive = index === active()}
       {@const itemClass = cn(
-        "flex w-full cursor-pointer items-center rounded-lg p-1 text-left text-sm transition-colors duration-200",
+        "flex w-full cursor-pointer items-center p-1 text-left text-sm transition-colors duration-200",
         isActive ? "text-foreground" : "text-foreground/50",
       )}
       <li data-index={index}>

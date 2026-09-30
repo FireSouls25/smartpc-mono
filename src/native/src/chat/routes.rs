@@ -19,6 +19,7 @@ use super::store::ChatStore;
 use crate::{
     ai::{provider::{LlmProvider, Provider}, routes::error_response},
     api::{AppState, AuthedUser},
+    cloud::sync::Job,
 };
 
 #[derive(Deserialize)]
@@ -44,6 +45,55 @@ pub struct SelectBody {
 #[derive(Deserialize)]
 pub struct ActionsQuery {
     pub session_id: Option<String>,
+}
+
+/// Queue the cloud mirror of a freshly written session. Fire-and-forget:
+/// the local write is already committed, and a failed push is repaired by
+/// the next `POST /v1/cloud/sync`.
+fn push_session(state: &AppState, uid: &str, session: super::model::Session) {
+    if !state.cloud.is_enabled() {
+        return;
+    }
+    state.cloud.enqueue(Job::Session {
+        user_id: uid.to_string(),
+        session,
+    });
+}
+
+fn push_messages(
+    state: &AppState,
+    uid: &str,
+    session_id: &str,
+    rows: Vec<super::model::ChatMessageRow>,
+) {
+    if !state.cloud.is_enabled() || rows.is_empty() {
+        return;
+    }
+    state.cloud.enqueue(Job::Messages {
+        user_id: uid.to_string(),
+        session_id: session_id.to_string(),
+        rows,
+    });
+}
+
+fn push_action(state: &AppState, uid: &str, action: super::model::Action) {
+    if !state.cloud.is_enabled() {
+        return;
+    }
+    state.cloud.enqueue(Job::Action {
+        user_id: uid.to_string(),
+        row: action,
+    });
+}
+
+fn push_session_deleted(state: &AppState, uid: &str, session_id: &str) {
+    if !state.cloud.is_enabled() {
+        return;
+    }
+    state.cloud.enqueue(Job::DeleteSession {
+        user_id: uid.to_string(),
+        session_id: session_id.to_string(),
+    });
 }
 
 fn lock_chat(state: &AppState) -> Result<MutexGuard<'_, ChatStore>, Response> {
@@ -135,8 +185,12 @@ pub async fn select(
         Ok(g) => g,
         Err(r) => return r,
     };
+    let selection = Selection {
+        provider: provider.name().to_string(),
+        model: model.clone(),
+    };
     if store
-        .upsert_selection(&uid, provider.name(), model.as_deref())
+        .upsert_selection(&uid, &selection.provider, selection.model.as_deref())
         .is_err()
     {
         return (
@@ -144,6 +198,13 @@ pub async fn select(
             Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
         )
             .into_response();
+    }
+    // The chosen model follows the account to the next device.
+    if s.cloud.is_enabled() {
+        s.cloud.enqueue(Job::Selection {
+            user_id: uid.clone(),
+            selection,
+        });
     }
     (
         StatusCode::OK,
@@ -221,7 +282,10 @@ pub async fn chat(
             None => {
                 match store.create_session(&uid, &title_of(&message), &prov_name, Some(&model_name))
                 {
-                    Ok(sess) => sess.id,
+                    Ok(sess) => {
+                        push_session(&s, &uid, sess.clone());
+                        sess.id
+                    }
                     Err(_) => return internal(),
                 }
             }
@@ -236,8 +300,9 @@ pub async fn chat(
             Ok(g) => g,
             Err(r) => return r,
         };
-        if store.add_message(&session_id, "user", &message).is_err() {
-            return internal();
+        match store.add_message(&session_id, "user", &message) {
+            Ok(row) => push_messages(&s, &uid, &session_id, vec![row]),
+            Err(_) => return internal(),
         }
     }
 
@@ -340,7 +405,10 @@ pub async fn create_session(
     };
     let title = non_empty(&b.title).unwrap_or_else(|| "New chat".into());
     match store.create_session(&uid, &title, "ollama", None) {
-        Ok(sess) => (StatusCode::CREATED, Json(serde_json::json!({ "session": sess }))).into_response(),
+        Ok(sess) => {
+            push_session(&s, &uid, sess.clone());
+            (StatusCode::CREATED, Json(serde_json::json!({ "session": sess }))).into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
@@ -396,7 +464,11 @@ pub async fn delete_session(
         Err(r) => return r,
     };
     match store.delete_session(&id, &uid) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        // Messages and actions leave the cloud with the session (cascade).
+        Ok(true) => {
+            push_session_deleted(&s, &uid, &id);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
         _ => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -495,6 +567,7 @@ pub async fn create_action(
     }
     match store.create_action(b.session_id.as_deref(), &uid, &kind, &title) {
         Ok(action) => {
+            push_action(&s, &uid, action.clone());
             (StatusCode::CREATED, Json(serde_json::json!({ "action": action }))).into_response()
         }
         Err(_) => (
@@ -526,11 +599,16 @@ pub async fn update_action(
     };
     match store.set_action_status_owned(&id, &uid, &b.status) {
         Ok(true) => match store.get_action(&id, &uid) {
-            Ok(Some(action)) => (
-                StatusCode::OK,
-                Json(serde_json::json!({ "action": action })),
-            )
-                .into_response(),
+            // Re-push the whole row: status is the mutable part the cloud
+            // mirror tracks (running → done | failed).
+            Ok(Some(action)) => {
+                push_action(&s, &uid, action.clone());
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "action": action })),
+                )
+                    .into_response()
+            }
             _ => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         },
         _ => (
@@ -655,7 +733,10 @@ pub async fn run(
             },
             None => match store.create_session(&uid, &title_of(&message), &prov_name, Some(&model))
             {
-                Ok(sess) => sess.id,
+                Ok(sess) => {
+                    push_session(&s, &uid, sess.clone());
+                    sess.id
+                }
                 Err(_) => return internal(),
             },
         }
@@ -670,8 +751,9 @@ pub async fn run(
             Ok(g) => g,
             Err(r) => return r,
         };
-        if store.add_message(&session_id, "user", &message).is_err() {
-            return internal();
+        match store.add_message(&session_id, "user", &message) {
+            Ok(row) => push_messages(&s, &uid, &session_id, vec![row]),
+            Err(_) => return internal(),
         }
     }
 
@@ -790,15 +872,26 @@ async fn pi_chat_turn(
     // native path: the next run sees what was actually executed).
     {
         let store = lock_chat(s).map_err(|r| r)?;
+        let mut written: Vec<super::model::ChatMessageRow> = Vec::new();
         for st in &out.steps {
             let content = serde_json::json!({
                 "tool": st.tool, "ok": st.ok, "output": st.output_preview,
             })
             .to_string();
-            if store
-                .add_message(session_id, "tool", &content)
-                .is_err()
-            {
+            match store.add_message(session_id, "tool", &content) {
+                Ok(row) => written.push(row),
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
+                    )
+                        .into_response());
+                }
+            }
+        }
+        match store.add_message(session_id, "assistant", &out.reply) {
+            Ok(row) => written.push(row),
+            Err(_) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
@@ -806,17 +899,14 @@ async fn pi_chat_turn(
                     .into_response());
             }
         }
-        if store
-            .add_message(session_id, "assistant", &out.reply)
-            .is_err()
-        {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
-            )
-                .into_response());
+        let touched = store.touch_session(session_id, prov_name, Some(model));
+        drop(store);
+        // Mirror the whole turn in one queue job: ordered after everything
+        // this turn wrote, and a single network round-trip per message.
+        push_messages(s, uid, session_id, written);
+        if let Ok(session) = touched {
+            push_session(s, uid, session);
         }
-        let _ = store.touch_session(session_id, prov_name, Some(model));
     }
     let run_line = format!(
         "[pi-run] session={} provider={} model={} steps={} calls={:?}",

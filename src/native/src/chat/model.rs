@@ -41,7 +41,7 @@ pub struct Action {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Selection {
     pub provider: String,
     pub model: Option<String>,

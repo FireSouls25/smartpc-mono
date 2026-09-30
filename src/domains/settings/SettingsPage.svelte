@@ -1,6 +1,7 @@
 <script lang="ts">
   import BounceSidebar from "../../components/ui/bounce-sidebar.svelte";
   import { auth } from "../auth/auth.store.svelte";
+  import { cloud } from "../auth/cloud.store.svelte";
   import { navigate } from "../../app/router.svelte";
   import {
     t,
@@ -26,6 +27,7 @@
     type VoiceStatus,
   } from "../voice/voice.api";
   import SelectMenu from "../../shared/SelectMenu.svelte";
+  import { timeOf } from "../../lib/format";
   let {
     onBack,
     initialSection = 0,
@@ -59,9 +61,14 @@
 
   // Voice status is live (mic hotplug, session state): refresh on every
   // entry. Debug output lives in the terminal now (sidecar stderr), not here.
+  // Cloud status changes from the outside (other devices sync), so it is
+  // read fresh on every Account visit.
   $effect(() => {
     if (section === 2) {
       void loadVoiceStatus();
+    }
+    if (section === 3) {
+      void cloud.load();
     }
   });
 
@@ -503,7 +510,7 @@
             <input
               id="voice-wake"
               class="field"
-              style="border-radius: 1rem; max-width: 16rem;"
+              style="max-width: 16rem;"
               type="text"
               maxlength={32}
               autocomplete="off"
@@ -536,6 +543,56 @@
             <p class="text-sm font-semibold">{auth.user?.email}</p>
             <p class="faint mt-0.5 text-xs">{t("settings.accountNote")}</p>
           </div>
+          {#if cloud.status}
+            <div class="group-card">
+              <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <h3 class="group-title">{t("cloud.title")}</h3>
+                  <p class="mt-0.5 text-sm font-semibold">
+                    {cloud.status.enabled ? t("cloud.on") : t("cloud.off")}
+                  </p>
+                  <p class="faint mt-0.5 text-xs">
+                    {cloud.status.enabled
+                      ? t("cloud.onHint")
+                      : t("cloud.offHint")}
+                  </p>
+                  {#if cloud.status.enabled && cloud.status.url}
+                    <p class="faint mt-0.5 text-xs">{cloud.status.url}</p>
+                  {/if}
+                </div>
+                {#if cloud.status.enabled}
+                  <button
+                    class="btn btn-ghost"
+                    disabled={cloud.syncing}
+                    onclick={() => void cloud.syncNow()}
+                  >
+                    {cloud.syncing ? t("cloud.syncing") : t("cloud.syncNow")}
+                  </button>
+                {/if}
+              </div>
+              {#if cloud.status.enabled}
+                <p class="faint mt-3 text-xs">
+                  {#if cloud.lastError}
+                    {t("cloud.error", { detail: cloud.lastError })}
+                  {:else if cloud.status.last_pull_at || cloud.status.last_push_at}
+                    {t("cloud.lastAt", {
+                      when: timeOf(
+                        cloud.status.last_pull_at ??
+                          cloud.status.last_push_at ??
+                          "",
+                      ),
+                    })}
+                    · {t("cloud.rows", {
+                      pulled: String(cloud.status.pulled),
+                      pushed: String(cloud.status.pushed),
+                    })}
+                  {:else}
+                    {t("cloud.never")}
+                  {/if}
+                </p>
+              {/if}
+            </div>
+          {/if}
           <div class="group-card">
             <div class="flex flex-wrap gap-2">
               <button class="btn btn-ghost" onclick={logout}>

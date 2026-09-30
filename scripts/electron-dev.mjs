@@ -7,11 +7,23 @@
 //   npm run dev:clean   (kills strays from another shell)
 //   reset               (re-inits the terminal; `clear` only repaints)
 import { execSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 const shell = process.platform === "win32";
 const HOST = "127.0.0.1";
 const PORT = 5173;
 const GROUP = process.platform !== "win32"; // own pgid → kill(-pid) hits the tree, never us
+
+// `.env` is Vite's source for VITE_* (renderer) and, since the sidecar owns
+// the Supabase keys, ours too: the sidecar reads its config from the process
+// environment, and Electron forwards it to the spawned child.
+try {
+  const envFile = path.join(import.meta.dirname, "..", ".env");
+  if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
+} catch {
+  // Older Node, or a malformed .env: the shell environment still works.
+}
 
 console.log("[dev] building sidecar (cargo)…");
 await new Promise((resolve, reject) => {

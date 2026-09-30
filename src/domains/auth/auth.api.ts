@@ -12,9 +12,16 @@ export interface TokenPair {
   expires_in: number;
 }
 
+/** Register answer: either a user, or "confirm your email first" (202). */
+export interface RegisterResult {
+  user: User | null;
+  needs_confirmation?: boolean;
+  message?: string;
+}
+
 export const authApi = {
   register: (email: string, password: string) =>
-    api<{ user: User }>("/v1/auth/register", {
+    api<RegisterResult>("/v1/auth/register", {
       method: "POST",
       body: { email, password },
     }),

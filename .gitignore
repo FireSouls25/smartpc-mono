@@ -5,3 +5,12 @@ test-results/
 !.env.example
 src/native/target/
 reference
+# Release artifacts (rebuilt by `npm run build-release`).
+release/
+# Local Supabase config: same keys as .env, never committed.
+supabase.json
+# Agent skills, vendored by `npx skills add supabase/agent-skills`.
+# skills-lock.json IS tracked: it pins what was installed.
+.agents/
+.claude/
+agent/

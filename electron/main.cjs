@@ -26,6 +26,40 @@ function sidecarBin() {
   return path.join(process.resourcesPath, "bin", name);
 }
 
+// Supabase configuration handed to the sidecar. Two sources, in order:
+// 1. the process environment (CI, `SUPABASE_URL=… npm run dev:electron`)
+// 2. `supabase.json` next to the app / in the project root (packaged builds)
+// The sidecar is the only process that needs these: the renderer never
+// talks to Supabase, so no key is exposed to the page.
+function supabaseEnv() {
+  const out = {};
+  for (const key of [
+    "SUPABASE_URL",
+    "SUPABASE_PROJECT_REF",
+    "SUPABASE_ANON_KEY",
+    "SUPABASE_PUBLISHABLE_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+  ]) {
+    if (process.env[key]) out[key] = process.env[key];
+  }
+  const candidates = [
+    path.join(__dirname, "..", "supabase.json"),
+    path.join(app.getPath("userData"), "supabase.json"),
+  ];
+  for (const file of candidates) {
+    if (Object.keys(out).length >= 2) break;
+    try {
+      const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+      for (const [k, v] of Object.entries(cfg)) {
+        if (typeof v === "string" && v && !out[k]) out[k] = v;
+      }
+    } catch {
+      /* absent or malformed: env-only configuration is fine */
+    }
+  }
+  return out;
+}
+
 // Starts the sidecar with a random per-launch token on an OS-assigned port.
 // Resolves once the binary prints its READY line.
 async function startSidecar() {
@@ -34,6 +68,7 @@ async function startSidecar() {
   const db = path.join(app.getPath("userData"), "smartpc.db");
   const child = spawn(bin, ["--port", "0", "--token", token, "--db", db], {
     stdio: ["ignore", "pipe", "inherit"],
+    env: { ...process.env, ...supabaseEnv() },
   });
   const url = await new Promise((resolve, reject) => {
     const timer = setTimeout(

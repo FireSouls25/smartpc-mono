@@ -1,0 +1,53 @@
+# electron-builder configuration.
+#
+# The renderer (dist/) and the Electron main process go into the ASAR archive;
+# the Rust sidecar is an executable and must live OUTSIDE it, unpacked, at
+# resources/bin/<name> — which is exactly where electron/main.cjs looks
+# (`process.resourcesPath/bin`). scripts/build-release.mjs builds it with
+# `cargo build --release` and stages it in release/staging/bin.
+appId: co.smartpc.desktop
+productName: Smart PC
+copyright: Smart PC
+
+directories:
+  output: release/out
+  buildResources: build
+
+# Only what the app needs at runtime. Everything else (src, tests, scripts,
+# node_modules dev deps) is left out of the archive.
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+
+extraResources:
+  - from: release/staging/bin
+    to: bin
+
+asar: true
+
+# Per-OS installers. Override per run: `--dir`, `--target=AppImage`, etc.
+linux:
+  target:
+    - AppImage
+  category: Utility
+  # The sidecar needs a writable home for its db, models and vault; the
+  # AppImage runs from a squashfs mount, so keep userData on $HOME (default).
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.utilities
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  # Not signed: `npm run build-release -- --dir` still produces a runnable
+  # .app locally; distributing needs a Developer ID + notarization.
+
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

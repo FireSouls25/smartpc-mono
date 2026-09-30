@@ -11,6 +11,7 @@ mod ai;
 mod api;
 mod auth;
 mod chat;
+mod cloud;
 mod diagnostics;
 mod harness;
 mod pi;
@@ -146,12 +147,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
             .join(","),
     });
+    // Supabase: accounts + history mirror. Absent config is not an error —
+    // the app then behaves exactly as before (local accounts only).
+    let cloud = Arc::new(crate::cloud::Cloud::new(crate::cloud::CloudConfig::from_env()));
+    match cloud.config() {
+        Some(cfg) => eprintln!("cloud: supabase auth + history mirror on ({})", cfg.url),
+        None => eprintln!("cloud: not configured (local accounts only)"),
+    }
+
     let state = api::AppState {
         store: Arc::new(Mutex::new(store)),
         chat: Arc::new(Mutex::new(chat_store)),
         voice: crate::stt::VoiceService::new(models_dir),
         tts: crate::tts::TtsManager::new(data_dir.clone(), crate::tts::resolve_voice_ext()),
         pi,
+        cloud,
         jwt_secret: Arc::new(jwt_secret),
         access_ttl_secs: 15 * 60,
         refresh_ttl_secs: 30 * 24 * 3600,

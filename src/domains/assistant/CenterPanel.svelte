@@ -44,22 +44,123 @@
       : voice.mode === "conversation"
         ? `${t("voice.modeConvo")} · ${displayHotkey(voice.hotkey)}`
         : `${t("voice.modeManual")} · ${displayHotkey(voice.hotkey)}`;
+
+  const voiceState = () =>
+    voice.capturing
+      ? "CAPTURING"
+      : voice.listening
+        ? "LISTENING"
+        : voice.phase === "starting"
+          ? "STARTING"
+          : "IDLE";
+
+  const engineOn = () => providers.activeAvailable();
 </script>
 
-<div class="flex h-full min-h-0 flex-1 flex-col gap-4">
-  <div
-    class="card-xl flex flex-col items-center"
-    style="padding-top: 1rem; padding-bottom: 1rem;"
-  >
-    <MatrixOrb
-      state={chat.orb}
-      size={180}
-      color="#f04e00"
-      labels={orbLabels()}
-    />
+<div class="card-xl flex h-full min-h-0 flex-1 flex-col">
+  <div class="panel-header">
+    <h2 class="panel-title">Agent Conversation</h2>
+    <span
+      class="mono flex items-center gap-1.5 text-[11px]"
+      style="color: var(--fg-muted);"
+    >
+      <span
+        class="dot {chat.orb === 'thinking' ? 'animate-pulse' : ''}"
+        style="background: {engineOn() ? 'var(--accent)' : 'var(--warn)'};"
+      ></span>
+      {engineOn() ? "Connected" : t("providers.offline")}
+    </span>
   </div>
 
-  <div class="card-xl flex min-h-0 flex-1 flex-col gap-3">
+  <!-- Presence block: our orb (mauve) + live model / voice telemetry. -->
+  <div
+    class="flex flex-col items-center justify-center gap-3 border-b px-3 py-3 md:flex-row"
+    style="border-color: var(--border); background: var(--surface);"
+  >
+    <div class="relative flex shrink-0 items-center justify-center">
+      <MatrixOrb
+        state={chat.orb}
+        size={144}
+        color="#cba6f7"
+        labels={orbLabels()}
+      />
+    </div>
+    <div class="flex w-full flex-col gap-1.5">
+      <div
+        class="mono border p-2 text-[11px]"
+        style="border-color: var(--border); background: var(--crust);"
+      >
+        <div
+          class="flex items-center justify-between gap-2 font-semibold"
+          style="color: var(--fg);"
+        >
+          <span class="truncate"
+            >{providers.activeModel || providers.activeProvider}</span
+          >
+          <span
+            class="px-1 uppercase tracking-widest"
+            style="background: var(--surface-2); color: var(--accent);"
+          >
+            {providers.activeProvider}
+          </span>
+        </div>
+        <div class="mt-0.5" style="color: var(--fg-muted);">
+          {providers.activeAvailable()
+            ? "Ready · reasoning & synthesizing"
+            : t("providers.needServer")}
+        </div>
+      </div>
+      <div
+        class="mono flex flex-col gap-1 border p-2 text-[11px]"
+        style="border-color: var(--border); background: var(--crust); color: var(--fg-muted);"
+      >
+        <div class="flex items-center justify-between">
+          <span>VOICE STATE:</span>
+          <span
+            style="color: {voice.listening
+              ? 'var(--teal)'
+              : 'var(--fg-faint)'};"
+          >
+            {voiceState()}
+          </span>
+        </div>
+        <div class="flex items-center justify-between">
+          <span>MODE:</span>
+          <span style="color: var(--fg);">
+            {voice.mode === "wake"
+              ? `WAKE «${voice.wakeWord}»`
+              : voice.mode === "conversation"
+                ? "CONVERSATION"
+                : "MANUAL"}
+          </span>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <button
+          type="button"
+          class="btn btn-ghost flex-1"
+          style="padding: 0.375rem 0.5rem;"
+          onclick={() => voice.setSpeakEnabled(!voice.speakEnabled)}
+          aria-pressed={voice.speakEnabled}
+          title={t("voice.speakHint")}
+        >
+          {voice.speakEnabled ? "MUTE VOICE" : t("voice.speak").toUpperCase()}
+        </button>
+        {#if voice.speaking}
+          <button
+            type="button"
+            class="btn btn-ghost"
+            style="padding: 0.375rem 0.5rem;"
+            onclick={() => void voice.stopSpeaking()}
+          >
+            STOP
+          </button>
+        {/if}
+      </div>
+    </div>
+  </div>
+
+  <div class="panel-body min-h-0 flex-1">
     <div
       bind:this={scrollEl}
       class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
@@ -68,11 +169,21 @@
       {#each chat.messages as m, i (m.id ?? `local-${i}`)}
         {#if m.role === "user"}
           <div class="msg-in flex justify-end">
-            <p class="bubble-user">{m.text}</p>
+            <div class="flex max-w-[85%] flex-col items-end gap-1">
+              <p class="hud-label" style="color: var(--info);">USER DISPATCH</p>
+              <p class="bubble-user">{m.text}</p>
+            </div>
           </div>
         {:else}
           <div class="msg-in flex justify-start">
             <div class="flex max-w-[85%] flex-col gap-1">
+              <p
+                class="hud-label flex items-center gap-1.5"
+                style="color: var(--accent);"
+              >
+                <span class="dot" style="background: var(--accent);"></span>
+                {providers.activeProvider.toUpperCase()} AGENT
+              </p>
               <p class="bubble-assistant" style="max-width: 100%;">
                 {m.textKey ? t(m.textKey) : m.text}
               </p>
@@ -88,7 +199,7 @@
                         class="dot"
                         style="background: {st.ok
                           ? 'var(--success)'
-                          : 'var(--danger)'}; height: 6px; width: 6px;"
+                          : 'var(--danger)'};"
                       ></span>
                       {st.tool}
                     </span>
@@ -103,104 +214,118 @@
 
     <form
       onsubmit={submit}
-      class="flex items-center gap-2 rounded-2xl border p-2"
-      style="border-color: var(--border-strong); background: var(--bg);"
+      class="border p-1.5"
+      style="border-color: var(--border-strong); background: var(--crust);"
     >
-      <button
-        type="button"
-        class="icon-btn shrink-0"
-        style={voice.capturing
-          ? "border-color: var(--danger); color: var(--danger);"
-          : voice.listening
-            ? "border-color: var(--accent); color: var(--accent);"
-            : ""}
-        onclick={() => voice.toggle()}
-        aria-label={voice.mode === "wake"
-          ? `${t("orb.listening")} (${voice.wakeWord})`
-          : t("orb.listening")}
-        aria-pressed={voice.listening}
-        title={micTitle()}
-        disabled={voice.phase === "starting"}
-      >
-        <svg
-          viewBox="0 0 24 24"
-          class="h-5 w-5"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="icon-btn shrink-0"
+          style={voice.capturing
+            ? "border-color: var(--danger); color: var(--danger);"
+            : voice.listening
+              ? "border-color: var(--accent); color: var(--accent);"
+              : ""}
+          onclick={() => voice.toggle()}
+          aria-label={voice.mode === "wake"
+            ? `${t("orb.listening")} (${voice.wakeWord})`
+            : t("orb.listening")}
+          aria-pressed={voice.listening}
+          title={micTitle()}
+          disabled={voice.phase === "starting"}
         >
-          <rect x="9" y="3" width="6" height="11" rx="3" />
-          <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-        </svg>
-      </button>
-      <input
-        class="min-w-0 flex-1 bg-transparent text-sm outline-none"
-        style="color: var(--fg);"
-        placeholder={t("chat.placeholder")}
-        value={chat.draft}
-        oninput={(e) => chat.setDraft(e.currentTarget.value)}
-      />
-      <button
-        class="btn shrink-0 {chat.orb === 'thinking' ? '' : 'btn-primary'}"
-        type={chat.orb === "thinking" ? "button" : "submit"}
-        style={chat.orb === "thinking"
-          ? "background: var(--danger); color: #fff;"
-          : ""}
-        onclick={() => {
-          if (chat.orb === "thinking") void chat.cancel();
-        }}
-        aria-label={chat.orb === "thinking" ? t("chat.stop") : t("chat.send")}
-      >
-        {#if chat.orb === "thinking"}
           <svg
             viewBox="0 0 24 24"
-            class="h-4 w-4"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-          {t("chat.stop")}
-        {:else}
-          <svg
-            viewBox="0 0 24 24"
-            class="h-4 w-4"
+            class="h-5 w-5"
             fill="none"
             stroke="currentColor"
             stroke-width="1.8"
             stroke-linecap="round"
             stroke-linejoin="round"
           >
-            <path d="M22 2 11 13M22 2l-7 20-4-9-9-4z" />
+            <rect x="9" y="3" width="6" height="11" rx="0" />
+            <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
           </svg>
-          {t("chat.send")}
+        </button>
+        <span
+          class="mono font-bold"
+          style="color: var(--accent);"
+          aria-hidden="true">&gt;</span
+        >
+        <input
+          class="mono min-w-0 flex-1 bg-transparent text-[13px] outline-none"
+          style="color: var(--fg);"
+          placeholder={t("chat.placeholder")}
+          value={chat.draft}
+          oninput={(e) => chat.setDraft(e.currentTarget.value)}
+        />
+        <button
+          class="btn shrink-0 {chat.orb === 'thinking' ? '' : 'btn-primary'}"
+          type={chat.orb === "thinking" ? "button" : "submit"}
+          style={chat.orb === "thinking"
+            ? "background: var(--danger); border-color: var(--danger); color: var(--crust);"
+            : ""}
+          onclick={() => {
+            if (chat.orb === "thinking") void chat.cancel();
+          }}
+          aria-label={chat.orb === "thinking" ? t("chat.stop") : t("chat.send")}
+        >
+          {#if chat.orb === "thinking"}
+            <svg
+              viewBox="0 0 24 24"
+              class="h-4 w-4"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <rect x="6" y="6" width="12" height="12" />
+            </svg>
+            {t("chat.stop").toUpperCase()}
+          {:else}
+            {t("chat.send").toUpperCase()}
+            <svg
+              viewBox="0 0 24 24"
+              class="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M22 2 11 13M22 2l-7 20-4-9-9-4z" />
+            </svg>
+          {/if}
+        </button>
+      </div>
+      <div
+        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 pt-1.5 text-[10px] uppercase tracking-widest"
+        style="color: var(--fg-faint);"
+      >
+        <span>PTT ({displayHotkey(voice.hotkey)})</span>
+        {#if voice.listening && !voice.capturing && voice.mode === "wake"}
+          <span>{t("voice.sayHey", { word: voice.wakeWord })}</span>
         {/if}
-      </button>
+        {#if voice.speaking}
+          <button
+            type="button"
+            class="underline"
+            style="color: var(--accent);"
+            onclick={() => void voice.stopSpeaking()}
+          >
+            {t("voice.speaking")} ✕
+          </button>
+        {/if}
+      </div>
     </form>
     {#if voice.error}
       <p class="error-box">{voice.error}</p>
     {/if}
     {#if voice.phase === "starting"}
-      <p class="faint text-xs">{t("voice.starting")}</p>
+      <p class="faint mono text-[11px]">{t("voice.starting")}</p>
     {/if}
     {#if voice.notice}
-      <p class="text-xs font-semibold" style="color: var(--accent);">
+      <p class="mono text-[11px] font-semibold" style="color: var(--accent);">
         {voice.notice}
       </p>
-    {/if}
-    {#if voice.speaking}
-      <button
-        type="button"
-        class="faint text-xs underline"
-        onclick={() => void voice.stopSpeaking()}
-      >
-        {t("voice.speaking")} ✕
-      </button>
-    {/if}
-    {#if voice.listening && !voice.capturing && voice.mode === "wake"}
-      <p class="faint text-xs">{t("voice.sayHey", { word: voice.wakeWord })}</p>
     {/if}
 
     <div class="flex flex-wrap items-center gap-2">
@@ -236,7 +361,7 @@
         onclick={() => void providers.loadProviders()}
         aria-label={t("providers.refresh")}
       >
-        ↻ {t("providers.refresh")}
+        ↻ {t("providers.refresh").toUpperCase()}
       </button>
     </div>
     {#if providers.selectError}

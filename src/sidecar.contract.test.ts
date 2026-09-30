@@ -53,7 +53,13 @@ beforeAll(async () => {
       "--db",
       db,
     ],
-    { cwd: process.cwd(), stdio: "ignore" },
+    {
+      cwd: process.cwd(),
+      stdio: "ignore",
+      // Hermetic: this spec pins shapes, and a developer with SUPABASE_*
+      // exported must not have the sidecar proxy auth to a real project.
+      env: { ...process.env, SMARTPC_CLOUD: "0" },
+    },
   );
   await waitForHealth();
 }, 600000);
@@ -137,6 +143,83 @@ describe("sidecar contract", () => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("unauthorized");
+  });
+
+  test("cloud routes are gated and report the feature as off", async () => {
+    // No token: the cloud status is as private as the rest of /v1.
+    const anon = await fetch(`${BASE}/v1/cloud/status`, { headers: gate });
+    expect(anon.status).toBe(401);
+
+    const tag = `c${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+
+    // SMARTPC_CLOUD=0 in this harness: enabled must be a clean, honest false.
+    const status = await fetch(`${BASE}/v1/cloud/status`, { headers: authed });
+    expect(status.ok).toBe(true);
+    const body = (await status.json()) as Record<string, unknown>;
+    expect(body["enabled"]).toBe(false);
+    expect(body["url"]).toBeNull();
+    expect(typeof body["pushed"]).toBe("number");
+    expect(typeof body["pulled"]).toBe("number");
+
+    // Sync without configuration is a client error, never a silent "ok".
+    const sync = await fetch(`${BASE}/v1/cloud/sync`, {
+      method: "POST",
+      headers: authed,
+    });
+    expect(sync.status).toBeGreaterThanOrEqual(400);
+  });
+
+  test("me reports whether the account is cloud-managed", async () => {
+    const tag = `m${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const res = await fetch(`${BASE}/v1/auth/me`, {
+      headers: { ...gate, Authorization: `Bearer ${tokens.access_token}` },
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      user: { email: string };
+      cloud_account: boolean;
+    };
+    expect(body.user.email).toBe(`${tag}@test.co`);
+    // Local signup: not a Supabase account.
+    expect(body.cloud_account).toBe(false);
   });
 
   test("unstartable providers fail closed, deterministically", async () => {

@@ -23,6 +23,16 @@ impl Store {
     pub fn open(db_path: &str) -> rusqlite::Result<Self> {
         let conn = db::connect(db_path)?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        // Tolerate databases created before refresh_tokens.source existed.
+        let has_source: bool = conn
+            .prepare("SELECT source FROM refresh_tokens LIMIT 0")
+            .is_ok();
+        if !has_source {
+            let _ = conn.execute(
+                "ALTER TABLE refresh_tokens ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+                [],
+            );
+        }
         Ok(Self { conn })
     }
 
@@ -51,6 +61,35 @@ impl Store {
 
     /// Returns the user plus its secret hash. Missing users surface as
     /// `QueryReturnedNoRows` so the service can answer without enumeration.
+    /// Keeps the local mirror truthful when the account email changes in
+    /// Supabase Auth. Unknown or foreign users are a no-op (0 rows).
+    pub fn set_user_email(&self, id: &str, email: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE users SET email = ?2 WHERE id = ?1",
+            params![id, email],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a user as Supabase-owned. Idempotent.
+    pub fn link_cloud_account(&self, user_id: &str, linked_at: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO cloud_accounts(user_id, linked_at) VALUES(?1,?2)
+             ON CONFLICT(user_id) DO NOTHING",
+            params![user_id, linked_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_cloud_account(&self, user_id: &str) -> rusqlite::Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cloud_accounts WHERE user_id = ?1",
+            [user_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn get_user_by_email(&self, email: &str) -> rusqlite::Result<(User, String)> {
         let mut stmt = self.conn.prepare(
             "SELECT id, email, password_hash, created_at FROM users WHERE lower(email) = lower(?1)",
@@ -106,6 +145,33 @@ impl Store {
             params![id, user_id, token_hash, expires_at, created_at],
         )?;
         Ok(())
+    }
+
+    /// Records a cloud refresh token so `refresh()` knows it must go back to
+    /// GoTrue. The plaintext token is only ever the sha256 of what we store.
+    pub fn set_refresh_token_source(&self, refresh_token_plain: &str, source: &str) -> rusqlite::Result<()> {
+        use sha2::{Digest, Sha256};
+        let hash = hex::encode(Sha256::digest(refresh_token_plain.as_bytes()));
+        self.conn.execute(
+            "UPDATE refresh_tokens SET source = ?2 WHERE token_hash = ?1",
+            params![hash, source],
+        )?;
+        Ok(())
+    }
+
+    /// `local` on pre-cloud rows, `cloud` when GoTrue issued the chain.
+    pub fn refresh_token_source(&self, token_hash: &str) -> rusqlite::Result<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source FROM refresh_tokens WHERE token_hash = ?1")?;
+        let mut rows = stmt.query([token_hash])?;
+        match rows.next()? {
+            Some(r) => {
+                let source: Option<String> = r.get(0)?;
+                Ok(source.unwrap_or_else(|| "local".into()))
+            }
+            None => Ok("local".into()),
+        }
     }
 
     pub fn get_refresh_token(&self, token_hash: &str) -> rusqlite::Result<RefreshToken> {

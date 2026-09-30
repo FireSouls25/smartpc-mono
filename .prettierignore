@@ -4,3 +4,8 @@ src/native/target/
 lancedb/
 .env
 package-lock.json
+# Vendored agent skills (third-party, installed with `npx skills add`).
+.agents/
+.claude/
+agent/
+skills-lock.json

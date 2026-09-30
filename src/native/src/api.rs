@@ -21,6 +21,7 @@ use tower_http::{
 use crate::{
     auth::{self, model::AuthError, store::Store},
     chat::store::ChatStore,
+    cloud::Cloud,
     pi::PiSupervisor,
     stt::VoiceService,
     tts::TtsManager,
@@ -28,7 +29,7 @@ use crate::{
 
 /// Protocol version: bump on any incompatible HTTP contract change.
 /// The UI compares it on boot and warns on mismatch (stale sidecar/app).
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -41,6 +42,9 @@ pub struct AppState {
     pub voice: VoiceService,
     pub tts: TtsManager,
     pub pi: PiSupervisor,
+    /// Supabase (accounts + history mirror). Disabled without config, in
+    /// which case every method is a no-op and the app stays local-only.
+    pub cloud: Arc<Cloud>,
 }
 
 /// User id placed on the request by [`require_user`].
@@ -140,6 +144,8 @@ pub fn router(state: AppState) -> Router {
             get(crate::chat::routes::key_status).post(crate::chat::routes::save_key),
         )
         .route("/v1/ai/keys/{id}", delete(crate::chat::routes::delete_key))
+        .route("/v1/cloud/status", get(crate::cloud::routes::status))
+        .route("/v1/cloud/sync", post(crate::cloud::routes::sync))
         .merge(user_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), require_user));
     let authed = Router::new()
@@ -193,7 +199,8 @@ pub struct AppError(pub AuthError);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, code, message, field) = match &self.0 {
+        let (status, code, message, field): (StatusCode, &str, String, Option<&str>) = match &self.0
+        {
             AuthError::EmailTaken => (
                 StatusCode::CONFLICT,
                 "email_taken",
@@ -218,11 +225,46 @@ impl IntoResponse for AppError {
                 "user not found".to_string(),
                 None,
             ),
+            // The account is real, the credentials live in Supabase Auth:
+            // a distinct code so the UI can offer the right path.
+            AuthError::CloudAccount => (
+                StatusCode::CONFLICT,
+                "cloud_account",
+                "this account signs in through Supabase — configure SUPABASE_ANON_KEY, \
+                 or use a local account"
+                    .to_string(),
+                None,
+            ),
+            // A local account already holds this email: adopting it would mix
+            // two people's data, so the sign-in is refused with a way out.
+            AuthError::EmailOwnedByLocalAccount => (
+                StatusCode::CONFLICT,
+                "email_conflict",
+                "a local account already uses this email — sign in with your local \
+                 password, or use another email for this cloud account"
+                    .to_string(),
+                None,
+            ),
+            // The signup route intercepts this and answers 202; reaching
+            // this arm means the confirmation notice was lost somewhere.
+            AuthError::NeedsEmailConfirmation => (
+                StatusCode::BAD_REQUEST,
+                "email_not_confirmed",
+                "check your email to confirm the account, then sign in".to_string(),
+                None,
+            ),
+            // Network/service trouble: retryable, never "wrong password".
+            AuthError::CloudUnavailable(detail) => (
+                StatusCode::BAD_GATEWAY,
+                "cloud_unavailable",
+                detail.clone(),
+                None,
+            ),
             AuthError::Validation { field, message } => (
                 StatusCode::BAD_REQUEST,
                 "validation",
                 message.to_string(),
-                Some(*field),
+                Some(*field as &str),
             ),
             AuthError::Internal(detail) => {
                 // Logged server-side only; the client gets a generic message.

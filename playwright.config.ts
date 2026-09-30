@@ -39,6 +39,10 @@ export default defineConfig({
         // the no-key modal path (ai-keys.spec) can't trigger. Tests must not
         // depend on who runs them.
         PI_AUTH_FILE: "/dev/null",
+        // Same idea for the cloud: a developer with SUPABASE_* exported would
+        // otherwise have the sidecar proxy auth to a real project and every
+        // seeded @test.co user would fail to register.
+        SMARTPC_CLOUD: "0",
       },
     },
     {

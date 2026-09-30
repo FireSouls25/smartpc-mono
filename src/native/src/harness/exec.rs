@@ -627,6 +627,17 @@ fn tool_type_text(args: &serde_json::Value, policy: &Policy) -> ToolOutcome {
 mod tests {
     use super::*;
 
+    /// The two `yes` tests share a process NAME, and `close_app` kills by
+    /// name: running them in parallel lets the roundtrip test reap the
+    /// process the tracking test just spawned (it then reads as "exited
+    /// immediately", exit signal 9). One guard makes them serial. Poisoning
+    /// is ignored on purpose — a failing neighbour must not cascade.
+    static APP_PROC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_app_proc() -> std::sync::MutexGuard<'static, ()> {
+        APP_PROC.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn locked_down() -> Policy {
         Policy { allow_risky: false }
     }
@@ -708,6 +719,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn open_app_tracks_running_process() {
+        let _serial = lock_app_proc();
         // `yes` runs forever: proves the success path, then we kill it.
         let out = execute(
             "open_app",
@@ -806,6 +818,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn close_app_roundtrip() {
+        let _serial = lock_app_proc();
         // Spawn `yes`, close it by name, verify only it is gone.
         // Coexistence-safe: tracks our own pid, ignores siblings.
         let open = execute(

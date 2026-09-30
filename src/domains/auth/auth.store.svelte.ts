@@ -94,9 +94,19 @@ async function login(email: string, password: string): Promise<void> {
   await writeRefresh(tokens.refresh_token);
 }
 
-async function register(email: string, password: string): Promise<void> {
-  await authApi.register(email, password);
+async function register(
+  email: string,
+  password: string,
+): Promise<{ needsConfirmation: boolean }> {
+  const res = await authApi.register(email, password);
+  // Supabase with email confirmation on answers 202 and no session: the
+  // account exists but cannot sign in yet. Surface it instead of failing
+  // the follow-up login with a confusing "invalid credentials".
+  if (res?.needs_confirmation || !res?.user) {
+    return { needsConfirmation: true };
+  }
   await login(email, password);
+  return { needsConfirmation: false };
 }
 
 async function restore(): Promise<void> {

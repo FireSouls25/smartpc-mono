@@ -86,6 +86,9 @@ has no React: `react`/`react-dom`/`motion`/`@vitejs/plugin-react` removed,
   `GET /v1/voice/events?cursor=` (25 s long-poll). Transcripts are not
   persisted here — the renderer feeds them to the agent itself.
 - Support: `GET /v1/support/diagnostics` (stderr mirror for the UI).
+- Cloud: `GET /v1/cloud/status`, `POST /v1/cloud/sync` (present only as a
+  feature; without Supabase config `status.enabled` is `false` and `sync`
+  fails with a client error).
 
 ## Data & identity
 
@@ -97,3 +100,10 @@ has no React: `react`/`react-dom`/`motion`/`@vitejs/plugin-react` removed,
   `safeStorage` (OS keychain), via `vault:*` IPC (`main.cjs`, allow-listed in
   `preload.cjs`). Plain web uses localStorage (documented risk); a vault
   failure falls back rather than locking out; pre-vault tokens migrate once.
+- Supabase (optional, `SUPABASE_*` env): Supabase Auth owns the credentials
+  and Postgres mirrors sessions/messages/actions. The renderer never sees a
+  key — the sidecar proxies auth and calls PostgREST with the user's own
+  access token, so RLS decides visibility. `refresh_tokens.source` records
+  which issuer a chain belongs to, so a device can hold both kinds; cloud
+  accounts carry a `!supabase` password marker and a `cloud_accounts` row.
+  Details: `docs/08-sync-design.md`, runbook `docs/11-supabase-cloud-runbook.md`.

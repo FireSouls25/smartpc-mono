@@ -22,7 +22,7 @@ function sidecarToken(): string {
 }
 
 /** Must match the sidecar PROTOCOL const; the shell warns on mismatch. */
-export const SIDECAR_PROTOCOL = 2;
+export const SIDECAR_PROTOCOL = 3;
 
 /** Default budget for sidecar calls. Chat/run/keys override per endpoint;
  * inference under cold VRAM is the only thing allowed past this. */

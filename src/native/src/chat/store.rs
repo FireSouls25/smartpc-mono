@@ -12,6 +12,16 @@ pub struct ChatStore {
     conn: Connection,
 }
 
+/// A user's whole local history, used to repair the cloud mirror
+/// (`cloud::sync::push_all`). Message rows carry their session id.
+#[derive(Debug, Default)]
+pub struct Export {
+    pub sessions: Vec<Session>,
+    pub messages: Vec<(String, ChatMessageRow)>,
+    pub actions: Vec<Action>,
+    pub selection: Option<Selection>,
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -106,17 +116,34 @@ impl ChatStore {
         rows.collect()
     }
 
+    /// Bumps the session stamp and returns the row as it now stands, so the
+    /// caller can mirror it without a second read.
     pub fn touch_session(
         &self,
         id: &str,
         provider: &str,
         model: Option<&str>,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<Session> {
+        let ts = now();
         self.conn.execute(
             "UPDATE chat_sessions SET provider = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
-            params![provider, model, now(), id],
+            params![provider, model, ts, id],
         )?;
-        Ok(())
+        self.conn.query_row(
+            "SELECT id, title, provider, model, created_at, updated_at
+             FROM chat_sessions WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(Session {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    provider: r.get(2)?,
+                    model: r.get(3)?,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            },
+        )
     }
 
     /// Deletes only what the user owns; messages + actions go via CASCADE.
@@ -286,6 +313,170 @@ impl ChatStore {
         )?;
         let rows = stmt.query_map(params![user_id, limit], row_to_action)?;
         rows.collect()
+    }
+
+    // ---------------------------------------------------------------------
+    // Cloud mirror (see cloud/sync.rs). Every write here is idempotent and
+    // ownership-scoped: an id we don't own is never created or updated.
+    // ---------------------------------------------------------------------
+
+    /// Inserts a session that only exists in the cloud. Returns false when
+    /// the id is already here (the local copy stays authoritative then).
+    pub fn insert_remote_session(
+        &self,
+        id: &str,
+        user_id: &str,
+        title: &str,
+        provider: &str,
+        model: Option<&str>,
+        created_at: &str,
+        updated_at: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "INSERT INTO chat_sessions(id, user_id, title, provider, model, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO NOTHING",
+            params![id, user_id, title, provider, model, created_at, updated_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Adopts cloud metadata on a session we already own. Returns false when
+    /// the row is not ours (the caller must not resurrect it).
+    pub fn update_session_meta(
+        &self,
+        id: &str,
+        user_id: &str,
+        title: &str,
+        provider: &str,
+        model: Option<&str>,
+        updated_at: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE chat_sessions SET title = ?3, provider = ?4, model = ?5, updated_at = ?6
+             WHERE id = ?1 AND user_id = ?2",
+            params![id, user_id, title, provider, model, updated_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Messages are immutable, so a first-writer-wins insert is enough.
+    pub fn insert_remote_message(
+        &self,
+        id: &str,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        created_at: &str,
+    ) -> rusqlite::Result<bool> {
+        // The parent session must be ours: the FK alone would accept a
+        // session owned by somebody else if we guessed the id.
+        let owned: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_sessions WHERE id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        if owned == 0 {
+            return Ok(false);
+        }
+        let n = self.conn.execute(
+            "INSERT INTO chat_messages(id, session_id, role, content, created_at)
+             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO NOTHING",
+            params![id, session_id, role, content, created_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn insert_remote_action(
+        &self,
+        id: &str,
+        session_id: &str,
+        kind: &str,
+        title: &str,
+        status: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "INSERT INTO actions(id, session_id, user_id, kind, title, status, created_at, updated_at)
+             SELECT ?1, ?2, user_id, ?3, ?4, ?5, ?6, ?7
+             FROM chat_sessions WHERE id = ?2
+             ON CONFLICT(id) DO NOTHING",
+            params![id, session_id, kind, title, status, created_at, updated_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Status updates are the only mutable part of an action. Returns false
+    /// when the row is foreign, missing, or already identical (so a replayed
+    /// pull does not look like a change).
+    pub fn update_action_meta(
+        &self,
+        id: &str,
+        user_id: &str,
+        status: &str,
+        updated_at: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE actions SET status = ?3, updated_at = ?4
+             WHERE id = ?1 AND user_id = ?2 AND (status != ?3 OR updated_at != ?4)",
+            params![id, user_id, status, updated_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Everything this user owns, for the repair push (`push_all`).
+    pub fn export(&self, user_id: &str) -> rusqlite::Result<Export> {
+        let sessions: Vec<Session> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, title, provider, model, created_at, updated_at
+                 FROM chat_sessions WHERE user_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map([user_id], |r| {
+                Ok(Session {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    provider: r.get(2)?,
+                    model: r.get(3)?,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let messages: Vec<(String, ChatMessageRow)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT m.session_id, m.id, m.role, m.content, m.created_at
+                 FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id
+                 WHERE s.user_id = ?1 ORDER BY m.created_at ASC",
+            )?;
+            let rows = stmt.query_map([user_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    ChatMessageRow {
+                        id: r.get(1)?,
+                        role: r.get(2)?,
+                        content: r.get(3)?,
+                        created_at: r.get(4)?,
+                    },
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let actions: Vec<Action> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, kind, title, status, created_at, updated_at
+                 FROM actions WHERE user_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map([user_id], row_to_action)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let selection = self.get_selection(user_id)?;
+        Ok(Export {
+            sessions,
+            messages,
+            actions,
+            selection,
+        })
     }
 
     pub fn get_selection(&self, user_id: &str) -> rusqlite::Result<Option<Selection>> {

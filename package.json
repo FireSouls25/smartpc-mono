@@ -2,6 +2,9 @@
   "name": "smart-pc-frontend",
   "private": true,
   "version": "0.1.0",
+  "description": "Smart PC — local-first voice and agent assistant for your PC",
+  "author": "Smart PC",
+  "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -10,6 +13,8 @@
     "dev:clean": "node scripts/kill-strays.mjs",
     "electron": "electron .",
     "build": "vite build",
+    "build-release": "node scripts/build-release.mjs",
+    "package": "node scripts/build-release.mjs --dir",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -22,21 +27,21 @@
     "verify": "npm run check && npm run lint && npm run format:check && npm run test:unit",
     "preview": "vite preview"
   },
-  "dependencies": {
-    "svelte": "^5.57.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.63.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tailwindcss/vite": "^4.0.0",
     "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-svelte": "^3.23.0",
     "globals": "^17.12.0",
     "prettier": "^3.9.8",
     "prettier-plugin-svelte": "^4.1.1",
+    "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.0.0",

@@ -24,7 +24,8 @@ src/
                           TopBar.svelte · router.svelte.ts (hash routes + auth guard)
   domains/
     auth/                 LoginPage · RegisterPage · auth.api · auth.store
-                          (vault-first refresh tokens, localStorage fallback)
+                          (vault-first refresh tokens, localStorage fallback) ·
+                          cloud.api · cloud.store (cloud status + sync now)
     assistant/            CenterPanel (orb+chat) · EventsFeed (actions+context) ·
                           SessionsPane (history) · ProviderStart (server start) ·
                           assistant.api · chat.store (conversation+lifecycle) ·
@@ -39,7 +40,9 @@ src/
                           theme.svelte · i18n/ (es contract, en) · i18n.svelte ·
                           cn.ts · format.ts (pure, unit-tested)
 electron/                 main.cjs (sidecar spawn + token vault) · preload.cjs
-scripts/                  electron-dev.mjs (cargo build + vite + electron)
+scripts/                  electron-dev.mjs (cargo build + vite + electron) ·
+                          build-release.mjs (vite + cargo --release + builder)
+supabase/migrations/      cloud schema + RLS (accounts, chat history)
 tests/                    smoke · layout (incl. @slow inference) · ai-keys ·
                           helpers (ports + user seeding)
                           (+ colocated src/**/*.test.ts unit, *.contract.test.ts)
@@ -64,12 +67,19 @@ vitest.config.ts          unit + contract projects (test:unit / test:contract)
   the composer. Mic button + Settings → Voice. See `docs/09-voice.md`.
 - Gestures: cut from the UI (P2 #13) — the toggle switched state with no
   detection pipeline. Returns with the pipeline; tagline unchanged (vision).
-- Supabase: module + dependency removed (P2 #14); design preserved in
-  `docs/08-sync-design.md`. Bundle: `dist/` 464K → 132K (JS 104K).
+- Supabase: accounts + history mirror, integrated through the sidecar
+  (2026-09-29). Supabase Auth owns the credentials; Postgres mirrors
+  sessions/messages/actions with RLS, write-through plus a local SQLite
+  cache. No supabase client in the renderer, no key in the bundle. Off
+  without `SUPABASE_*` config, which is how the tests run.
+  See `docs/08-sync-design.md` and `docs/11-supabase-cloud-runbook.md`.
+  (The old client module stays removed — P2 #14 — so `dist/` keeps its
+  464K → 132K size win.)
 - Diagnostics: sidecar stderr mirror at `GET /v1/support/diagnostics`,
   viewable/copyable in Settings → AI.
-- Protocol guard: `SIDECAR_PROTOCOL = 2` (`src/lib/api.ts`); Shell warns
-  on mismatch with `/health`.
+- Protocol guard: `SIDECAR_PROTOCOL = 3` (`src/lib/api.ts`); Shell warns
+  on mismatch with `/health`. Bumped for the cloud endpoints and the
+  `202 {needs_confirmation}` signup answer.
 - Provider availability is polled every 3 s (silent, paused when the tab is
   hidden); a startable-but-offline server (Ollama) offers a one-click Start
   in the chat pane and Settings → AI. See `docs/07-provider-availability.md`.

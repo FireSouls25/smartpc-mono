@@ -20,6 +20,30 @@ jobs:
       - run: cargo test --manifest-path src/native/Cargo.toml
       - run: npm run test:contract
 
+  release:
+    # The release path breaks silently (stale sidecar binary, wrong resources
+    # layout), so CI builds an unpacked package on every push instead of
+    # discovering it at release time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Package (unpacked)
+        run: node scripts/build-release.mjs --dir
+      - name: Check the packaged layout
+        run: |
+          # The sidecar must be unpacked next to the asar, executable.
+          test -x release/out/linux-unpacked/resources/bin/smartpc-native
+          test -f release/out/linux-unpacked/resources/app/dist/index.html
+          test -f release/out/linux-unpacked/resources/app/electron/main.cjs
+
   fast-e2e:
     runs-on: ubuntu-latest
     steps:
