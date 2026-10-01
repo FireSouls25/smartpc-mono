@@ -177,13 +177,6 @@
         {:else}
           <div class="msg-in flex justify-start">
             <div class="flex max-w-[85%] flex-col gap-1">
-              <p
-                class="hud-label flex items-center gap-1.5"
-                style="color: var(--accent);"
-              >
-                <span class="dot" style="background: var(--accent);"></span>
-                {providers.activeProvider.toUpperCase()} AGENT
-              </p>
               <p class="bubble-assistant" style="max-width: 100%;">
                 {m.textKey ? t(m.textKey) : m.text}
               </p>

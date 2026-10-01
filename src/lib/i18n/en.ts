@@ -88,6 +88,10 @@ export const en: Record<I18nKey, string> = {
   "voice.hotkeyHint": "Toggles the microphone from anywhere.",
   "voice.osGain": "OS volume",
   "voice.muted": "muted",
+  "voice.mutedHint":
+    "Microphone muted at the OS level: unmute it with `wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0`, then retry.",
+  "voice.lowGainHint":
+    "Gain too low: your voice stays under the threshold. Raise it with `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 1.0`, then retry.",
   "voice.models": "Installed models",
   "voice.downloaded": "Downloaded",
   "voice.notDownloaded": "Not downloaded",
@@ -110,6 +114,8 @@ export const en: Record<I18nKey, string> = {
     "Not installed or not on PATH — install Ollama first.",
   "providers.needServer": "Start Ollama or llama-server to really chat.",
   "events.title": "Activity",
+  "events.all": "All",
+  "events.active": "Active",
   "events.running": "Running",
   "events.done": "Done",
   "events.failed": "Failed",

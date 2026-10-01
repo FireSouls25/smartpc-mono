@@ -385,6 +385,13 @@
                 </span>
               {/if}
             </div>
+            {#if voiceStatus?.mixer && (voiceStatus.mixer.muted || voiceStatus.mixer.volume < 0.5)}
+              <p class="mt-1 text-xs" style="color: var(--warn);">
+                {voiceStatus.mixer.muted
+                  ? t("voice.mutedHint")
+                  : t("voice.lowGainHint")}
+              </p>
+            {/if}
           </div>
           <div class="group-card">
             <h3 class="group-title">{t("voice.sttModel")}</h3>

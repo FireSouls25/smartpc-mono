@@ -636,39 +636,51 @@ body {
     opacity: 0.55;
     cursor: not-allowed;
   }
-  /* Segmented control: joined mono units in one bordered container. */
-  .seg {
+  /* Top-bar dropdown triggers: sharp bordered mono units that open the
+   * shared .dropdown menu below. Icons stay monochrome (currentColor). */
+  .topdrop-trigger {
     display: inline-flex;
-    align-items: stretch;
-    border: 1px solid var(--border-strong);
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.5rem;
     background: var(--crust);
+    border: 1px solid var(--border-strong);
+    color: var(--fg-muted);
     font-family: var(--font-mono);
     font-size: 11px;
-  }
-  .seg > span {
-    padding: 0.375rem 0.5rem;
-    border-right: 1px solid var(--border);
-    color: var(--fg-faint);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    font-size: 10px;
-    font-weight: 600;
-  }
-  .seg button {
-    padding: 0.375rem 0.5rem;
-    color: var(--fg-muted);
     cursor: pointer;
-    border-top: 2px solid transparent;
   }
-  .seg button:hover {
+  .topdrop-trigger:hover {
     background: var(--surface-2);
     color: var(--fg);
   }
-  .seg button[aria-pressed="true"] {
-    background: var(--surface-2);
-    color: var(--fg);
-    border-top-color: var(--accent);
-    font-weight: 700;
+  .topdrop-trigger svg {
+    height: 1rem;
+    width: 1rem;
+    flex-shrink: 0;
+  }
+  .topdrop-trigger .chev {
+    height: 0.75rem;
+    width: 0.75rem;
+  }
+  .topdrop-marker {
+    display: inline-block;
+    height: 6px;
+    width: 6px;
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+  }
+  .topdrop-marker[data-on="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .dropdown button svg {
+    height: 1rem;
+    width: 1rem;
+    flex-shrink: 0;
   }
 }
 

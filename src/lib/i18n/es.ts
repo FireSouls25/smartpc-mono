@@ -90,6 +90,10 @@ export const es = {
   "voice.hotkeyHint": "Alterna el micrófono desde cualquier parte.",
   "voice.osGain": "Volumen del SO",
   "voice.muted": "silenciado",
+  "voice.mutedHint":
+    "Micrófono silenciado en el sistema: actívalo con `wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0` y reintenta.",
+  "voice.lowGainHint":
+    "Ganancia muy baja: tu voz queda por debajo del umbral. Súbela con `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 1.0` y reintenta.",
   "voice.models": "Modelos instalados",
   "voice.downloaded": "Descargado",
   "voice.notDownloaded": "No descargado",
@@ -113,6 +117,8 @@ export const es = {
   "providers.needServer":
     "Inicia Ollama o llama-server para chatear de verdad.",
   "events.title": "Actividad",
+  "events.all": "Todas",
+  "events.active": "Activa",
   "events.running": "En curso",
   "events.done": "Completada",
   "events.failed": "Fallida",

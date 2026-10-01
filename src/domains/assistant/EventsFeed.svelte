@@ -14,6 +14,16 @@
     failed: chat.events.filter((e) => e.status === "failed").length,
   });
 
+  const tabs = (): { key: Filter; label: string; count: number }[] => {
+    const c = counts();
+    return [
+      { key: "all", label: t("events.all"), count: c.all },
+      { key: "running", label: t("events.running"), count: c.running },
+      { key: "done", label: t("events.done"), count: c.done },
+      { key: "failed", label: t("events.failed"), count: c.failed },
+    ];
+  };
+
   const visible = () =>
     filter === "all"
       ? chat.events
@@ -25,16 +35,12 @@
     return "var(--success)";
   }
 
-  function tag(status: string): string {
-    if (status === "running") return "EXEC";
-    if (status === "failed") return "ERR";
-    return "DONE";
-  }
-
-  function label(status: string): string {
+  // Single localized status text: the pill below is the only place it
+  // appears, so it never repeats (no DONE + "Completada" duplication).
+  function statusText(status: string): string {
     if (status === "running") return t("events.running");
     if (status === "failed") return t("events.failed");
-    return "✓ " + t("events.done");
+    return t("events.done");
   }
 
   function ctxPct(): number {
@@ -67,18 +73,18 @@
     role="tablist"
     aria-label={t("events.title")}
   >
-    {#each [["all", counts().all], ["running", counts().running], ["done", counts().done], ["failed", counts().failed]] as [key, n] (key)}
+    {#each tabs() as tab (tab.key)}
       <button
         type="button"
         role="tab"
-        aria-selected={filter === key}
+        aria-selected={filter === tab.key}
         class="flex-1 whitespace-nowrap px-1 py-1.5 text-center uppercase tracking-wider transition-colors"
-        style={filter === key
+        style={filter === tab.key
           ? "background: var(--bg); color: var(--fg); font-weight: 700;"
           : "color: var(--fg-muted);"}
-        onclick={() => (filter = key as Filter)}
+        onclick={() => (filter = tab.key)}
       >
-        {key} ({n})
+        {tab.label} ({tab.count})
       </button>
     {/each}
   </div>
@@ -118,21 +124,21 @@
         >
           <div class="flex items-center justify-between gap-2">
             <span
-              class="mono inline-flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] font-bold"
+              class="mono inline-flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] font-bold uppercase"
               style="background: var(--crust); color: {color(ev.status)};"
             >
               <span
                 class="dot {ev.status === 'running' ? 'animate-pulse' : ''}"
                 style="background: {color(ev.status)};"
               ></span>
-              {tag(ev.status)}
+              {statusText(ev.status)}
             </span>
             {#if ev.continuous}
               <span
-                class="mono animate-pulse text-[10px]"
+                class="mono animate-pulse text-[10px] uppercase"
                 style="color: var(--peach);"
               >
-                ACTIVE
+                {t("events.active")}
               </span>
             {/if}
           </div>
@@ -141,12 +147,6 @@
             style="color: var(--fg);"
           >
             {ev.title}
-          </p>
-          <p
-            class="mono mt-1 text-[10px] font-semibold uppercase tracking-widest"
-            style="color: {color(ev.status)};"
-          >
-            {label(ev.status)}
           </p>
         </li>
       {/each}
