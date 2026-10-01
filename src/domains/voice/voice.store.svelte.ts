@@ -61,9 +61,11 @@ function loadDevice(): string | null {
 
 function loadSpeak(): boolean {
   try {
-    return window.localStorage.getItem(SPEAK_KEY) === "1";
+    // Speech defaults ON (fresh installs hear replies; the toggle mutes to
+    // text-only). An explicit stored "0" keeps a muted user muted.
+    return window.localStorage.getItem(SPEAK_KEY) !== "0";
   } catch {
-    return false;
+    return true;
   }
 }
 

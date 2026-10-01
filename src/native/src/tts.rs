@@ -155,7 +155,28 @@ impl TtsManager {
                     buf.clear();
                     match reader.read_until(b'\n', &mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(_) => {}
+                        Ok(_) => {
+                            // Extension commands report success even when the
+                            // utterance failed (proven: unknown model id) —
+                            // the ONLY signal is an error notification line.
+                            // Surface it so failures stop being silent.
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                                let is_err = v.get("method").and_then(|m| m.as_str())
+                                    == Some("notify")
+                                    && v.get("notifyType").and_then(|t| t.as_str())
+                                        == Some("error");
+                                if is_err {
+                                    let msg = v
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("unknown pi-listen error");
+                                    crate::diagnostics::push(format!(
+                                        "tts: {}",
+                                        msg.chars().take(300).collect::<String>()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -252,14 +273,18 @@ pub fn resolve_voice_ext() -> std::path::PathBuf {
 
 /// Voice model per UI language (pi-listen catalog ids). Piper MIT voices
 /// where available (~21 MB); kitten default otherwise.
+/// NOTE: pi-listen wants the full `piper-…` ids — the bare Piper names
+/// (`es_ES-davefx…`) are rejected as unknown and the utterance dies
+/// silently (fire-and-forget design), which is exactly how Spanish TTS
+/// stayed broken: only the kitten default ever worked.
 pub fn tts_model_for_lang(lang: &str) -> &'static str {
     match lang {
-        "es" => "es_ES-davefx-medium-int8",
-        "fr" => "fr_FR-siwis-medium-int8",
-        "de" => "de_DE-thorsten-medium-int8",
-        "it" => "it_IT-paola-medium-int8",
-        "pt" => "pt_BR-cadu-medium-int8",
-        "hi" => "hi_IN-pratham-medium-int8",
+        "es" => "piper-es_ES-davefx-medium-int8",
+        "fr" => "piper-fr_FR-siwis-medium-int8",
+        "de" => "piper-de_DE-thorsten-medium-int8",
+        "it" => "piper-it_IT-paola-medium-int8",
+        "pt" => "piper-pt_BR-cadu-medium-int8",
+        "hi" => "piper-hi_IN-pratham-medium-int8",
         _ => "kitten-nano-en-v0_2",
     }
 }
@@ -301,9 +326,11 @@ mod tests {
 
     #[test]
     fn models_cover_our_languages() {
-        assert_eq!(tts_model_for_lang("es"), "es_ES-davefx-medium-int8");
+        // piper- prefix required: bare Piper names are unknown to pi-listen
+        // (see tts_model_for_lang docs for how this broke Spanish TTS).
+        assert_eq!(tts_model_for_lang("es"), "piper-es_ES-davefx-medium-int8");
         assert_eq!(tts_model_for_lang("en"), "kitten-nano-en-v0_2");
-        assert_eq!(tts_model_for_lang("fr"), "fr_FR-siwis-medium-int8");
+        assert_eq!(tts_model_for_lang("fr"), "piper-fr_FR-siwis-medium-int8");
         // Unknown falls back to the English default (documented).
         assert_eq!(tts_model_for_lang("xx"), "kitten-nano-en-v0_2");
     }

@@ -233,8 +233,10 @@ construction; `/voice-speak-stop` (or any new speak) barges in by killing.
 
 The child runs with an isolated `HOME` (`<data>/pi/tts-home`, our own
 `settings.json`: TTS enabled, local backend, per-language voice) — never
-the user's real pi setup. Voices: Piper MIT per language (`es_ES-davefx`,
-`fr_FR-siwis`, …) defaulting to Kitten Nano EN. First use downloads ~21 MB.
+the user's real pi setup. Voices: Piper MIT per language (`piper-es_ES-davefx`,
+`piper-fr_FR-siwis`, … — the full `piper-` ids pi-listen requires; bare
+Piper names are rejected as unknown) defaulting to Kitten Nano EN. First use
+downloads ~21 MB.
 History stays clean (verified: 0 messages before/after a speak).
 `POST /v1/voice/speak {text, lang?}` → `{ok, estimated_ms}` (400 on empty /
 
