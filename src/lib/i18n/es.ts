@@ -34,6 +34,8 @@ export const es = {
     "Al salir no había conexión con la nube: tus últimos cambios quedaron guardados solo en este equipo. Se subirán la próxima vez que inicies sesión aquí.",
   "common.loading": "Cargando…",
   "common.done": "Entendido",
+  "common.search": "Buscar…",
+  "common.noResults": "Sin resultados",
   "common.hide": "Ocultar",
   "common.show": "Mostrar",
   "common.theme": "Tema",

@@ -34,6 +34,8 @@ export const en: Record<I18nKey, string> = {
     "No cloud connection at sign-out: your latest changes are stored only on this device. They will upload next time you sign in here.",
   "common.loading": "Loading…",
   "common.done": "Got it",
+  "common.search": "Search…",
+  "common.noResults": "No results",
   "common.hide": "Hide",
   "common.show": "Show",
   "common.theme": "Theme",

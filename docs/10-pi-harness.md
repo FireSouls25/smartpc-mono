@@ -91,10 +91,10 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► pi --mode rpc
   selection persists in sidecar as today → `set_model` per turn. Our
   `registerProvider` extension row adds ollama/llama.cpp/Zen endpoints so pi
   works even without user pi config. Since the RPC only reports authenticated
-  + local providers, the endpoint appends pi's built-in registry from a
-  version-pinned repo snapshot (`src/native/assets/pi-models.json`,
-  regen via `scripts/regen-pi-models.mjs`) so the UI lists, validates, and
-  takes keys for the whole catalog — live data wins whenever present.
+  - local providers, the endpoint appends pi's built-in registry from a
+    version-pinned repo snapshot (`src/native/assets/pi-models.json`,
+    regen via `scripts/regen-pi-models.mjs`) so the UI lists, validates, and
+    takes keys for the whole catalog — live data wins whenever present.
 - **Keys**: sidecar injects keyring/file keys as `<PROVIDER>_API_KEY` env for
   the pi child, using pi's exact env table mirrored in `secrets.rs`
   (`PI_KEY_ENV`, from pi's `packages/ai/src/env-api-keys.ts`, pi 0.85.1 —

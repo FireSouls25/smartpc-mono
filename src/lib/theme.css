@@ -423,9 +423,42 @@ body {
   .dropdown-up {
     top: auto;
     bottom: calc(100% + 10px);
-    max-height: 12rem;
+    left: 0;
+    right: auto;
+    min-width: min(15rem, 80vw);
+    max-height: 18rem;
     overflow-y: auto;
-    min-width: 100%;
+  }
+  /* Filter row pinned to the top of searchable menus. */
+  .dropdown-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--crust);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .dropdown-search svg {
+    height: 0.9rem;
+    width: 0.9rem;
+    flex-shrink: 0;
+    color: var(--fg-faint);
+  }
+  .dropdown-search input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+  .dropdown-search input::placeholder {
+    color: var(--fg-faint);
   }
   /* Top-anchored menus (Settings pages): the trigger wrapper is full-width,
    * so right-anchoring lands the list at the far edge of the section.
