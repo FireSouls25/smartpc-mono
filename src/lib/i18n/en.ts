@@ -30,6 +30,8 @@ export const en: Record<I18nKey, string> = {
   "auth.logout": "Sign out",
   "auth.delete": "Delete account",
   "auth.deleteAsk": "Delete your account forever? This cannot be undone.",
+  "auth.logoutUnsynced":
+    "No cloud connection at sign-out: your latest changes are stored only on this device. They will upload next time you sign in here.",
   "common.loading": "Loading…",
   "common.hide": "Hide",
   "common.show": "Show",

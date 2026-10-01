@@ -343,8 +343,16 @@ fn issue_pair(
     })
 }
 
+/// What `POST /v1/auth/logout` reports back. `cloud_flushed` is false only
+/// when the pre-logout drain timed out (dead network): local rows are
+/// intact and the next login repairs them, but the UI should say so —
+/// otherwise the user believes the cloud already has everything.
+pub struct LogoutOutcome {
+    pub cloud_flushed: bool,
+}
+
 /// Idempotent: unknown tokens still succeed.
-pub async fn logout(refresh_token: &str, state: &AppState) -> Result<(), AuthError> {
+pub async fn logout(refresh_token: &str, state: &AppState) -> Result<LogoutOutcome, AuthError> {
     let hash = sha256_hex(refresh_token);
     // Which user does this chain belong to? Needed to end the Supabase
     // session and to drop the cached access token.
@@ -360,11 +368,11 @@ pub async fn logout(refresh_token: &str, state: &AppState) -> Result<(), AuthErr
         // here, sign in over there" carry the last turns with it. Bounded:
         // a dead network must not hang logout; leftovers stay in SQLite
         // and the next login repairs them via push_all.
-        if !state
+        let cloud_flushed = state
             .cloud
             .flush_user(&uid, std::time::Duration::from_secs(20))
-            .await
-        {
+            .await;
+        if !cloud_flushed {
             eprintln!("cloud: logout flush timed out, local rows kept");
         }
         let access = state.cloud.access_for(&uid);
@@ -373,8 +381,10 @@ pub async fn logout(refresh_token: &str, state: &AppState) -> Result<(), AuthErr
         }
         state.cloud.forget_token(&uid);
         state.cloud.drop_queue(&uid);
+        return Ok(LogoutOutcome { cloud_flushed });
     }
-    Ok(())
+    // Unknown token: nothing belonged to it, nothing to drain.
+    Ok(LogoutOutcome { cloud_flushed: true })
 }
 
 /// Deleting the local account cascades to chat rows, secrets and tokens.
@@ -507,7 +517,9 @@ mod tests {
             refresh(&pair2.refresh_token, &s).await,
             Err(AuthError::InvalidToken)
         ));
-        logout("unknown-token", &s).await.unwrap(); // idempotent
+        // Idempotent, and with the cloud off the drain is a no-op success.
+        let out = logout("unknown-token", &s).await.unwrap();
+        assert!(out.cloud_flushed);
 
         let (me_user, is_cloud) = me(&user.id, &s).unwrap();
         assert_eq!(me_user.email, "ada@example.com");

@@ -248,7 +248,12 @@ describe("sidecar contract", () => {
       body: JSON.stringify({ refresh_token: tokens.refresh_token }),
     });
     expect(out.ok).toBe(true);
-    expect(((await out.json()) as { ok: boolean }).ok).toBe(true);
+    const outBody = (await out.json()) as {
+      ok: boolean;
+      cloud_flushed: boolean;
+    };
+    expect(outBody.ok).toBe(true);
+    expect(outBody.cloud_flushed).toBe(true);
     // Unknown tokens still succeed (idempotent).
     const unknown = await fetch(`${BASE}/v1/auth/logout`, {
       method: "POST",

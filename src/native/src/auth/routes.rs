@@ -94,8 +94,11 @@ pub async fn logout(
     State(s): State<AppState>,
     Json(b): Json<RefreshBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    service::logout(&b.refresh_token, &s).await.map_err(AppError)?;
-    Ok((StatusCode::OK, Json(serde_json::json!({ "ok": true }))))
+    let outcome = service::logout(&b.refresh_token, &s).await.map_err(AppError)?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "cloud_flushed": outcome.cloud_flushed })),
+    ))
 }
 
 pub async fn me(

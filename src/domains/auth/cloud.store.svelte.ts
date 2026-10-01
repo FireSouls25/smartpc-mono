@@ -33,6 +33,9 @@ async function syncNow(): Promise<boolean> {
   try {
     await cloudApi.sync(auth.token);
     await load();
+    // A full reconcile just pushed everything local: any logout-time
+    // warning about pending rows is resolved.
+    auth.clearLogoutWarning();
     return true;
   } catch (err) {
     lastError = err instanceof Error ? err.message : "Sync failed";

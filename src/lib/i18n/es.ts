@@ -30,6 +30,8 @@ export const es = {
   "auth.delete": "Eliminar cuenta",
   "auth.deleteAsk":
     "¿Eliminar tu cuenta para siempre? Esta acción no se puede deshacer.",
+  "auth.logoutUnsynced":
+    "Al salir no había conexión con la nube: tus últimos cambios quedaron guardados solo en este equipo. Se subirán la próxima vez que inicies sesión aquí.",
   "common.loading": "Cargando…",
   "common.hide": "Ocultar",
   "common.show": "Mostrar",

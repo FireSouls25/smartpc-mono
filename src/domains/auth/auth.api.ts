@@ -37,7 +37,7 @@ export const authApi = {
     }),
   me: (token: string) => api<{ user: User }>("/v1/auth/me", { token }),
   logout: (refresh_token: string) =>
-    api<{ ok: boolean }>("/v1/auth/logout", {
+    api<{ ok: boolean; cloud_flushed: boolean }>("/v1/auth/logout", {
       method: "POST",
       body: { refresh_token },
     }),

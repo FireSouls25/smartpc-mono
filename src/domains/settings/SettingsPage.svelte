@@ -543,6 +543,9 @@
             <p class="text-sm font-semibold">{auth.user?.email}</p>
             <p class="faint mt-0.5 text-xs">{t("settings.accountNote")}</p>
           </div>
+          {#if auth.logoutWarning}
+            <p class="warn-box">{t("auth.logoutUnsynced")}</p>
+          {/if}
           {#if cloud.status}
             <div class="group-card">
               <div class="flex flex-wrap items-start justify-between gap-4">

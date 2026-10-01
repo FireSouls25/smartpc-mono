@@ -92,6 +92,11 @@ async function login(email: string, password: string): Promise<void> {
   user = u;
   accessToken = tokens.access_token;
   await writeRefresh(tokens.refresh_token);
+  // A fresh sign-in runs the cloud reconcile, which repairs anything a
+  // previous logout left behind — the warning has served its purpose.
+  // (Single-account devices are the norm; the flag is approximate by design.
+  // See logoutWarning below.)
+  clearLogoutWarning();
 }
 
 async function register(
@@ -126,11 +131,22 @@ async function restore(): Promise<void> {
 
 async function logout(): Promise<void> {
   const rt = await readRefresh();
+  let flushed = true;
   try {
-    if (rt) await authApi.logout(rt);
+    if (rt) {
+      const res = await authApi.logout(rt);
+      // Older sidecars answer `{ok: true}` without the field: no warning
+      // then, since they predate the pre-logout drain entirely.
+      flushed = res.cloud_flushed ?? true;
+    }
   } catch {
     /* already gone server-side */
   }
+  // Warn only on a positive timeout signal. Anything still queued lives on
+  // in SQLite and uploads at the next sign-in on this device — the login
+  // page says exactly that.
+  if (flushed) clearLogoutWarning();
+  else setLogoutWarning();
   user = null;
   accessToken = null;
   await writeRefresh(null);
@@ -142,6 +158,43 @@ async function deleteAccount(): Promise<void> {
   user = null;
   accessToken = null;
   await writeRefresh(null);
+  clearLogoutWarning();
+}
+
+// Whether the last logout left rows unpushed (flush timed out: dead
+// network). Persisted, not just in memory: quit-the-app-after-logout must
+// not swallow it, since the rows are still sitting in this device's SQLite.
+// Boolean, not per-user: reconcile-on-login repairs the signing-in account,
+// which is the case this warning is about.
+const LOGOUT_WARN_KEY = "smartpc.logout-warning";
+
+function readWarnFlag(): boolean {
+  try {
+    return window.localStorage.getItem(LOGOUT_WARN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeWarnFlag(on: boolean): void {
+  try {
+    if (on) window.localStorage.setItem(LOGOUT_WARN_KEY, "1");
+    else window.localStorage.removeItem(LOGOUT_WARN_KEY);
+  } catch {
+    /* private mode */
+  }
+}
+
+let logoutWarning = $state(readWarnFlag());
+
+function setLogoutWarning(): void {
+  logoutWarning = true;
+  writeWarnFlag(true);
+}
+
+function clearLogoutWarning(): void {
+  logoutWarning = false;
+  writeWarnFlag(false);
 }
 
 export const auth = {
@@ -151,9 +204,13 @@ export const auth = {
   get token(): string | null {
     return accessToken;
   },
+  get logoutWarning(): boolean {
+    return logoutWarning;
+  },
   login,
   register,
   restore,
   logout,
   deleteAccount,
+  clearLogoutWarning,
 };

@@ -92,6 +92,9 @@
           {t("auth.toLogin")} →
         </button>
       {:else}
+        {#if isLogin() && auth.logoutWarning}
+          <p class="warn-box mb-3">{t("auth.logoutUnsynced")}</p>
+        {/if}
         <form onsubmit={submit} class="flex flex-col gap-3">
           <div>
             <label class="label" for="auth-email">{t("auth.email")}</label>
