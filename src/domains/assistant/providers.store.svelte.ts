@@ -15,6 +15,8 @@ let keyStatus = $state<Record<string, boolean>>({});
 let keyModal = $state<{ provider: string; hasKey: boolean } | null>(null);
 let keyBusy = $state(false);
 let keyError = $state("");
+/** Shown in the modal after an unverified save (see saveKey). */
+let keyNotice = $state("");
 let startingProvider = $state<string | null>(null);
 let startError = $state("");
 let activeProvider = $state("ollama");
@@ -108,6 +110,12 @@ async function selectProvider(
     return;
   }
   if (p.needs_key && !keyStatus[p.id]) {
+    // OAuth/subscription ids take no pasted keys: point at pi auth instead
+    // of opening a modal that would only refuse.
+    if (!p.key_paste) {
+      selectError = t("aikey.piAuth");
+      return;
+    }
     openKeyModal(id);
     return;
   }
@@ -138,17 +146,20 @@ async function refreshKeyStatus(): Promise<void> {
 
 function openKeyModal(provider: string): void {
   keyError = "";
+  keyNotice = "";
   keyModal = { provider, hasKey: !!keyStatus[provider] };
 }
 
 function closeKeyModal(): void {
   keyModal = null;
   keyError = "";
+  keyNotice = "";
 }
 
 async function saveKey(provider: string, key: string): Promise<void> {
   keyBusy = true;
   keyError = "";
+  keyNotice = "";
   try {
     const res = await aiApi.saveKey(provider, key);
     // The verify response already carries the fresh catalog for this
@@ -161,6 +172,13 @@ async function saveKey(provider: string, key: string): Promise<void> {
           ? { ...p, available: true, models: [...res.models] }
           : p,
       );
+    }
+    if (!res.verified) {
+      // Stored, but pi offers no live check for this provider: stay open
+      // with an honest notice instead of auto-selecting a key that might
+      // be a typo. The next manual select runs normally.
+      keyNotice = t("aikey.unverified");
+      return;
     }
     closeKeyModal();
     // Persist the pre-selection for a model that actually answers — the
@@ -245,6 +263,9 @@ export const providerStore = {
   },
   get keyError(): string {
     return keyError;
+  },
+  get keyNotice(): string {
+    return keyNotice;
   },
   get startingProvider(): string | null {
     return startingProvider;

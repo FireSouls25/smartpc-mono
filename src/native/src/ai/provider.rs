@@ -145,15 +145,6 @@ impl Provider {
         matches!(self, Self::OpenCode(_))
     }
 
-    /// Guard chat paths: a keyed provider with no model selected is a
-    /// configuration error, not a gateway round-trip.
-    pub fn check_usable(&self, model: &str) -> Result<(), ProviderError> {
-        if self.requires_key() && model.trim().is_empty() {
-            return Err(ProviderError::MissingModel);
-        }
-        Ok(())
-    }
-
     /// Effective context window in tokens, when the provider reports one
     /// (Ollama: our configured num_ctx). Feeds the UI context meter.
     pub fn context_window(&self) -> Option<u32> {

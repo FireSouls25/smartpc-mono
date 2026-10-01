@@ -8,6 +8,9 @@ export interface ProviderInfo {
   models: string[];
   default_model: string;
   needs_key: boolean;
+  /** False for OAuth/subscription ids (copilot, codex, bedrock): keys for
+   * those are refused — authenticate with `pi auth` instead. */
+  key_paste: boolean;
   context_window: number | null;
   /** The sidecar knows how to launch this server (today: ollama only). */
   startable: boolean;
@@ -24,6 +27,9 @@ export interface SaveKeyResponse {
   ok: boolean;
   models: string[];
   suggested_model: string | null;
+  /** False when pi lists the provider but offers no live check (only
+   * opencode verifies today) — the key is stored, first use proves it. */
+  verified: boolean;
 }
 
 export interface SessionSummary {

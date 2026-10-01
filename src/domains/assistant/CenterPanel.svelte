@@ -47,19 +47,26 @@
 
   const voiceState = () =>
     voice.capturing
-      ? "CAPTURING"
+      ? t("voice.stateCapturing")
       : voice.listening
-        ? "LISTENING"
+        ? t("voice.stateListening")
         : voice.phase === "starting"
-          ? "STARTING"
-          : "IDLE";
+          ? t("voice.stateStarting")
+          : t("voice.stateIdle");
+
+  const voiceMode = () =>
+    voice.mode === "wake"
+      ? t("voice.shortWake", { word: voice.wakeWord })
+      : voice.mode === "conversation"
+        ? t("voice.shortConvo")
+        : t("voice.shortManual");
 
   const engineOn = () => providers.activeAvailable();
 </script>
 
 <div class="card-xl flex h-full min-h-0 flex-1 flex-col">
   <div class="panel-header">
-    <h2 class="panel-title">Agent Conversation</h2>
+    <h2 class="panel-title">{t("agent.title")}</h2>
     <span
       class="mono flex items-center gap-1.5 text-[11px]"
       style="color: var(--fg-muted);"
@@ -68,13 +75,13 @@
         class="dot {chat.orb === 'thinking' ? 'animate-pulse' : ''}"
         style="background: {engineOn() ? 'var(--accent)' : 'var(--warn)'};"
       ></span>
-      {engineOn() ? "Connected" : t("providers.offline")}
+      {engineOn() ? t("agent.connected") : t("providers.offline")}
     </span>
   </div>
 
-  <!-- Presence block: our orb (mauve) + live model / voice telemetry. -->
+  <!-- Presence block: centered orb, narrow telemetry column. -->
   <div
-    class="flex flex-col items-center justify-center gap-3 border-b px-3 py-3 md:flex-row"
+    class="flex flex-col items-center gap-3 border-b px-3 py-3"
     style="border-color: var(--border); background: var(--surface);"
   >
     <div class="relative flex shrink-0 items-center justify-center">
@@ -85,7 +92,7 @@
         labels={orbLabels()}
       />
     </div>
-    <div class="flex w-full flex-col gap-1.5">
+    <div class="flex w-full max-w-md flex-col gap-1.5">
       <div
         class="mono border p-2 text-[11px]"
         style="border-color: var(--border); background: var(--crust);"
@@ -106,7 +113,7 @@
         </div>
         <div class="mt-0.5" style="color: var(--fg-muted);">
           {providers.activeAvailable()
-            ? "Ready · reasoning & synthesizing"
+            ? t("agent.ready")
             : t("providers.needServer")}
         </div>
       </div>
@@ -115,8 +122,9 @@
         style="border-color: var(--border); background: var(--crust); color: var(--fg-muted);"
       >
         <div class="flex items-center justify-between">
-          <span>VOICE STATE:</span>
+          <span class="uppercase">{t("voice.state")}:</span>
           <span
+            class="uppercase"
             style="color: {voice.listening
               ? 'var(--teal)'
               : 'var(--fg-faint)'};"
@@ -125,13 +133,9 @@
           </span>
         </div>
         <div class="flex items-center justify-between">
-          <span>MODE:</span>
-          <span style="color: var(--fg);">
-            {voice.mode === "wake"
-              ? `WAKE «${voice.wakeWord}»`
-              : voice.mode === "conversation"
-                ? "CONVERSATION"
-                : "MANUAL"}
+          <span class="uppercase">{t("voice.mode")}:</span>
+          <span class="uppercase" style="color: var(--fg);">
+            {voiceMode()}
           </span>
         </div>
       </div>
@@ -144,7 +148,9 @@
           aria-pressed={voice.speakEnabled}
           title={t("voice.speakHint")}
         >
-          {voice.speakEnabled ? "MUTE VOICE" : t("voice.speak").toUpperCase()}
+          {voice.speakEnabled
+            ? t("voice.mute").toUpperCase()
+            : t("voice.speak").toUpperCase()}
         </button>
         {#if voice.speaking}
           <button
@@ -153,7 +159,7 @@
             style="padding: 0.375rem 0.5rem;"
             onclick={() => void voice.stopSpeaking()}
           >
-            STOP
+            {t("chat.stop").toUpperCase()}
           </button>
         {/if}
       </div>

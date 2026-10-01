@@ -17,7 +17,10 @@ use serde::Deserialize;
 use super::model::Selection;
 use super::store::ChatStore;
 use crate::{
-    ai::{provider::{LlmProvider, Provider}, routes::error_response},
+    ai::{
+        provider::{LlmProvider, Provider, ProviderError},
+        routes::error_response,
+    },
     api::{AppState, AuthedUser},
     cloud::sync::Job,
 };
@@ -152,41 +155,70 @@ pub async fn selection(
 }
 
 /// Validates provider + model against the live server, then persists them.
-/// This is the "connect once selected" step.
+/// This is the "connect once selected" step. Native providers validate
+/// against their own clients; anything else pi lists validates against pi's
+/// live catalog (unknown ids fail here, never mid-turn).
 pub async fn select(
     State(s): State<AppState>,
     Extension(AuthedUser(uid)): Extension<AuthedUser>,
     Json(b): Json<SelectBody>,
 ) -> impl IntoResponse {
-    let provider = match provider_with_key(&b.provider, &uid) {
-        Ok(p) => p,
+    let id = b.provider.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "validation", "message": "provider is required", "field": "provider" }
+            })),
+        )
+            .into_response();
+    }
+    // Native fast path (loopback + opencode keep today's key injection).
+    // The key gate runs first so a missing key answers missing_key here,
+    // exactly where the UI opens the key modal from.
+    let (prov_id, model) = match turn_provider(&id, &uid) {
+        Ok(TurnProvider::Native(p)) => {
+            let models = match p.models().await {
+                Ok(m) => m,
+                Err(e) => return error_response(&e),
+            };
+            let model = non_empty(&b.model);
+            if let Some(ref m) = model {
+                if !models.iter().any(|x| x == m) {
+                    return unknown_model(&p.name().to_string(), m);
+                }
+            }
+            (p.name().to_string(), model)
+        }
+        Ok(TurnProvider::Pi { id }) => {
+            let models = match crate::pi::providers::models_for(&s, &id).await {
+                Some(m) => m,
+                None => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": { "code": "ai_unreachable", "message": "could not reach the pi catalog — is pi installed?" }
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let model = non_empty(&b.model);
+            if let Some(ref m) = model {
+                if !models.iter().any(|x| x == m) {
+                    return unknown_model(&id, m);
+                }
+            }
+            (id, model)
+        }
         Err(e) => return e,
     };
-    let models = match provider.models().await {
-        Ok(m) => m,
-        Err(e) => return error_response(&e),
-    };
-    let model = non_empty(&b.model);
-    if let Some(ref m) = model {
-        if !models.iter().any(|x| x == m) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": {
-                        "code": "unknown_model",
-                        "message": format!("model not available from {}: {m}", provider.name()),
-                    }
-                })),
-            )
-                .into_response();
-        }
-    }
     let store = match lock_chat(&s) {
         Ok(g) => g,
         Err(r) => return r,
     };
     let selection = Selection {
-        provider: provider.name().to_string(),
+        provider: prov_id.clone(),
         model: model.clone(),
     };
     if store
@@ -208,7 +240,20 @@ pub async fn select(
     }
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "provider": provider.name(), "model": model })),
+        Json(serde_json::json!({ "provider": prov_id, "model": model })),
+    )
+        .into_response()
+}
+
+fn unknown_model(provider: &str, model: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": {
+                "code": "unknown_model",
+                "message": format!("model not available from {provider}: {model}"),
+            }
+        })),
     )
         .into_response()
 }
@@ -241,20 +286,18 @@ pub async fn chat(
         Ok(store) => store.get_selection(&uid).ok().flatten(),
         Err(r) => return r,
     };
-    let (prov_name, model_name) = match resolve_for_chat(&b, persisted.as_ref()) {
+    let (mut agent, prov_name, model_name) = match resolve_turn(
+        b.provider.as_deref(),
+        b.model.as_deref(),
+        persisted.as_ref(),
+        &uid,
+    ) {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let mut provider = match provider_with_key(&prov_name, &uid) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    if let Err(e) = provider.check_usable(&model_name) {
-        return error_response(&e);
-    }
     // Missing local model (fresh installs ask for `llama3.1`): download it
     // once instead of failing every turn, typed or voice-driven.
-    if provider.name() == "ollama" {
+    if agent.name() == "ollama" {
         if let Err(e) = crate::ai::ollama::ensure_model_present(&model_name).await {
             return pull_error(&e);
         }
@@ -294,7 +337,7 @@ pub async fn chat(
 
     // Store the user message. The lock is released before any await.
     // Session affinity: Zen routes per conversation id.
-    provider.set_session_id(Some(session_id.clone()));
+    agent.set_session_id(Some(session_id.clone()));
     {
         let store = match lock_chat(&s) {
             Ok(g) => g,
@@ -320,59 +363,128 @@ pub async fn chat(
         StatusCode::OK,
         Json(serde_json::json!({
             "reply": done.reply, "model": model_name,
-            "provider": provider.name(), "session_id": session_id,
+            "provider": prov_name, "session_id": session_id,
         })),
     )
         .into_response()
 }
 
-fn resolve_for_chat(
-    b: &ChatBody,
+/// What a turn runs under. Native providers keep today's behavior (live
+/// objects with key injection); any other id pi lists is passed through by
+/// name — pi resolves its models and auth at turn time.
+enum TurnProvider {
+    Native(Provider),
+    Pi { id: String },
+}
+
+impl TurnProvider {
+    fn name(&self) -> &str {
+        match self {
+            Self::Native(p) => p.name(),
+            Self::Pi { id } => id,
+        }
+    }
+
+    /// Built-in default, if the provider has one. Pi-managed ids don't:
+    /// the model must come from the request or the persisted selection.
+    fn default_model(&self) -> Option<&str> {
+        match self {
+            Self::Native(p) => Some(p.default_model()),
+            Self::Pi { .. } => None,
+        }
+    }
+
+    /// Session affinity is a native-gateway concern (Zen's
+    /// `x-opencode-session`); pi children manage their own sessions.
+    fn set_session_id(&mut self, id: Option<String>) {
+        if let Self::Native(p) = self {
+            p.set_session_id(id);
+        }
+    }
+
+    fn context_window(&self) -> Option<u32> {
+        match self {
+            Self::Native(p) => p.context_window(),
+            Self::Pi { .. } => None,
+        }
+    }
+}
+
+/// Turn-time key gate, extracted pure for testing: a turn may proceed when
+/// the provider needs no key (loopback), we hold a pasted key, or pi
+/// authenticates it through the user's own config.
+fn key_gate_passes(has_stored_key: bool, has_pi_auth: bool, is_local: bool) -> bool {
+    is_local || has_stored_key || has_pi_auth
+}
+
+fn missing_key_response() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": { "code": "missing_key", "message": "this provider needs an API key — add it in Settings" }
+        })),
+    )
+        .into_response()
+}
+
+/// Turn-time provider resolution: explicit > persisted > built-in default.
+/// Never touches the network (no pi RPC on the hot path): membership was
+/// validated at select time, the key gate below is local-only (our store or
+/// pi's own auth.json), and pi itself fails honestly on unknown ids.
+fn turn_provider(name: &str, uid: &str) -> Result<TurnProvider, Response> {
+    if let Ok(p) = Provider::resolve(name) {
+        if !p.requires_key() {
+            return Ok(TurnProvider::Native(p));
+        }
+        if let Some(k) = crate::secrets::get_key(uid, p.name()) {
+            return Provider::resolve_with_key(p.name(), Some(k))
+                .map(TurnProvider::Native)
+                .map_err(|e| error_response(&e));
+        }
+    }
+    if !key_gate_passes(
+        crate::secrets::get_key(uid, name).is_some(),
+        crate::pi::providers::pi_auth_has(name),
+        crate::pi::providers::is_local_provider(name),
+    ) {
+        return Err(missing_key_response());
+    }
+    Ok(TurnProvider::Pi { id: name.to_string() })
+}
+
+/// Shared by `chat` and `run`: resolves (provider, model) strings for the
+/// turn. A missing model is a configuration error, not a gateway round-trip.
+fn resolve_turn(
+    provider: Option<&str>,
+    model: Option<&str>,
     persisted: Option<&super::model::Selection>,
-) -> Result<(String, String), Response> {
-    let prov_name = non_empty(&b.provider).unwrap_or_else(|| {
-        persisted
-            .as_ref()
-            .map(|p| p.provider.clone())
-            .unwrap_or_else(|| "ollama".into())
-    });
-    let provider = match Provider::resolve(&prov_name) {
-        Ok(p) => p,
-        Err(e) => return Err(error_response(&e)),
-    };
-    let model = non_empty(&b.model)
+    uid: &str,
+) -> Result<(TurnProvider, String, String), Response> {
+    let prov_name = provider
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| persisted.as_ref().map(|p| p.provider.clone()))
+        .unwrap_or_else(|| "ollama".into());
+    let agent = turn_provider(&prov_name, uid)?;
+    let model_name = model
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .or_else(|| {
             persisted.and_then(|p| {
-                if p.provider == provider.name() {
+                if p.provider == agent.name() {
                     p.model.clone()
                 } else {
                     None
                 }
             })
         })
-        .unwrap_or_else(|| provider.default_model().to_string());
-    Ok((provider.name().to_string(), model))
-}
-
-/// Resolve + inject the user's stored key for keyed providers.
-/// Construction without a key is fine for probing; chatting is not.
-fn provider_with_key(name: &str, uid: &str) -> Result<Provider, Response> {
-    let probe = match Provider::resolve(name) {
-        Ok(p) => p,
-        Err(e) => return Err(error_response(&e)),
-    };
-    if !probe.requires_key() {
-        return Ok(probe);
-    }
-    match crate::secrets::get_key(uid, probe.name()) {
-        Some(k) => Provider::resolve_with_key(probe.name(), Some(k)).map_err(|e| error_response(&e)),
-        None => Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": { "code": "missing_key", "message": "this provider needs an API key — add it in Settings" }
-            })),
-        )
-            .into_response()),
+        .or_else(|| agent.default_model().map(str::to_string))
+        .filter(|m| !m.trim().is_empty());
+    match model_name {
+        Some(m) => Ok((agent, prov_name, m)),
+        None => Err(error_response(&ProviderError::MissingModel)),
     }
 }
 
@@ -682,32 +794,17 @@ pub async fn run(
         Ok(store) => store.get_selection(&uid).ok().flatten(),
         Err(r) => return r,
     };
-    let prov_name = non_empty(&b.provider).unwrap_or_else(|| {
-        persisted
-            .as_ref()
-            .map(|p| p.provider.clone())
-            .unwrap_or_else(|| "ollama".into())
-    });
-    let mut provider = match provider_with_key(&prov_name, &uid) {
-        Ok(p) => p,
-        Err(e) => return e,
+    let (mut agent, prov_name, model) = match resolve_turn(
+        b.provider.as_deref(),
+        b.model.as_deref(),
+        persisted.as_ref(),
+        &uid,
+    ) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
-    let model = non_empty(&b.model)
-        .or_else(|| {
-            persisted.as_ref().and_then(|p| {
-                if p.provider == provider.name() {
-                    p.model.clone()
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| provider.default_model().to_string());
-    if let Err(e) = provider.check_usable(&model) {
-        return error_response(&e);
-    }
     // Same first-use download as `chat` (agentic turns need the model too).
-    if provider.name() == "ollama" {
+    if agent.name() == "ollama" {
         if let Err(e) = crate::ai::ollama::ensure_model_present(&model).await {
             return pull_error(&e);
         }
@@ -744,7 +841,7 @@ pub async fn run(
 
     // Session affinity: Zen routes per conversation id (MissingSessionID
     // without it). The provider forwards it as `x-opencode-session`.
-    provider.set_session_id(Some(session_id.clone()));
+    agent.set_session_id(Some(session_id.clone()));
 
     {
         let store = match lock_chat(&s) {
@@ -762,7 +859,7 @@ pub async fn run(
         .as_deref()
         .filter(|l| !l.trim().is_empty())
         .unwrap_or("es");
-    let ctx_window = provider.context_window();
+    let ctx_window = agent.context_window();
     let done = match pi_chat_turn(
         &s, &uid, &session_id, &prov_name, &model, &message, lang,
     )
@@ -774,7 +871,7 @@ pub async fn run(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "reply": done.reply, "model": model, "provider": provider.name(),
+            "reply": done.reply, "model": model, "provider": prov_name,
             "session_id": session_id, "steps": done.steps,
             "context": { "used_tokens": done.used_tokens, "window": done.window.or(ctx_window) },
         })),
@@ -818,11 +915,13 @@ async fn pi_chat_turn(
     lang: &str,
 ) -> Result<PiTurnDone, Response> {
     use crate::pi::turn::{run_turn, TurnInput};
-    // Same key gate as the native path for the provider we manage; every
-    // other pi provider authenticates through the user's own pi config.
-    if prov_name == "opencode"
-        && crate::secrets::get_key(uid, "opencode").is_none()
-        && !crate::pi::providers::pi_auth_has("opencode")
+    // Safety net matching turn_provider's gate: non-loopback providers need
+    // a key here or in pi's own auth. resolve_turn already enforces this, so
+    // reaching this arm means a new caller bypassed it — fail with the same
+    // actionable code rather than an opaque pi auth error mid-turn.
+    if !crate::pi::providers::is_local_provider(prov_name)
+        && crate::secrets::get_key(uid, prov_name).is_none()
+        && !crate::pi::providers::pi_auth_has(prov_name)
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -938,30 +1037,41 @@ pub struct SaveKeyBody {
     pub key: String,
 }
 
+/// Provider ids we accept keys for: pi-style ids only. This guards the
+/// env-var derivation (`{ID}_API_KEY`) against shell-hostile input; typos
+/// are caught later against pi's live catalog.
+fn valid_provider_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 /// Stores a provider API key in the OS credential store (never in SQLite).
-/// Verifies with the cheapest possible live call so typos fail fast here
-/// instead of mysteriously at chat time.
+/// The one natively-managed keyed provider (opencode) verifies with the
+/// cheapest possible live call so typos fail fast here instead of
+/// mysteriously at chat time. Any other id pi lists is stored unverified —
+/// pi has no validity-check API (`auth check` only proves presence) — and
+/// the response says so honestly; the first real turn is the proof.
+/// Either way the user's pi child is reaped so the next spawn picks the
+/// (new or removed) key up in its environment.
 pub async fn save_key(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Extension(AuthedUser(uid)): Extension<AuthedUser>,
     Json(b): Json<SaveKeyBody>,
 ) -> impl IntoResponse {
-    let probe = match Provider::resolve(&b.provider) {
-        Ok(p) => p,
-        Err(e) => return error_response(&e),
-    };
-    if !probe.requires_key() {
-        // Providers pi manages itself (the user's own pi auth) can't take
-        // keys through us — but local providers genuinely need no key.
-        if !crate::pi::providers::is_local_provider(&b.provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": { "code": "validation", "message": "this provider authenticates through pi itself — add the key with pi auth, not here", "field": "provider" }
-                })),
-            )
-                .into_response();
-        }
+    let id = b.provider.trim().to_string();
+    if !valid_provider_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "validation", "message": "unknown provider", "field": "provider" }
+            })),
+        )
+            .into_response();
+    }
+    if crate::pi::providers::is_local_provider(&id) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -970,7 +1080,88 @@ pub async fn save_key(
         )
             .into_response();
     }
+    if crate::secrets::pi_managed_only(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "validation", "message": "this provider authenticates through pi itself (OAuth/subscription) — add the key with pi auth, not here", "field": "provider" }
+            })),
+        )
+            .into_response();
+    }
+    // Native keyed providers keep the live verification path.
+    if let Ok(p) = Provider::resolve(&id) {
+        if p.requires_key() {
+            return save_key_verified(&s, &uid, &p, &b.key).await;
+        }
+    }
+    // Anything else pi knows (registry table or live custom providers):
+    // pi offers no validity check (`auth check` only proves presence), so
+    // the key is stored unverified and the first real turn is the proof.
+    // Membership is still enforced — typos fail here, not mid-turn. The
+    // response carries the known models so the picker fills immediately.
+    let models = match crate::pi::providers::models_for(&s, &id).await {
+        Some(m) => m,
+        None if crate::secrets::accepts_pasted_key(&id) => Vec::new(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "unknown_provider", "message": format!("unknown provider: {id}") }
+                })),
+            )
+                .into_response();
+        }
+    };
     let candidate = b.key.trim().to_string();
+    if candidate.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "invalid_key", "message": "that key looks too short — paste the full key" }
+            })),
+        )
+            .into_response();
+    }
+    match crate::secrets::set_key(&uid, &id, &candidate) {
+        Ok(()) => {
+            crate::diagnostics::push(format!("keys: {id} key saved (unverified)"));
+            // Fresh environment for the next turn: the live child (if any)
+            // was spawned without this key.
+            s.pi.drop_child(&uid).await;
+            // Known models ride along so the picker fills immediately even
+            // though nothing was verified.
+            let suggested = models.first().cloned();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "ok": true, "models": models,
+                    "suggested_model": suggested,
+                    "verified": false,
+                })),
+            )
+                .into_response()
+        }
+        Err(detail) => {
+            eprintln!("key store failed: {detail}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": { "code": "internal", "message": "could not save the key on this machine" } })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The opencode live-verify + store path, unchanged apart from the child
+/// reap and the `verified` flag in the response.
+async fn save_key_verified(
+    s: &AppState,
+    uid: &str,
+    probe: &Provider,
+    key: &str,
+) -> Response {
+    let candidate = key.trim().to_string();
     if candidate.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
@@ -1030,17 +1221,19 @@ pub async fn save_key(
         },
         Err(_) => (vec![], None),
     };
-    match crate::secrets::set_key(&uid, probe.name(), &candidate) {
+    match crate::secrets::set_key(uid, probe.name(), &candidate) {
         Ok(()) => {
             crate::diagnostics::push(format!(
                 "keys: {} key saved ({} live models)",
                 probe.name(),
                 models.len()
             ));
+            s.pi.drop_child(uid).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "ok": true, "models": models, "suggested_model": suggested
+                    "ok": true, "models": models, "suggested_model": suggested,
+                    "verified": true,
                 })),
             )
                 .into_response()
@@ -1057,26 +1250,12 @@ pub async fn save_key(
 }
 
 pub async fn delete_key(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Extension(AuthedUser(uid)): Extension<AuthedUser>,
     Path(provider): Path<String>,
 ) -> impl IntoResponse {
-    let probe = match Provider::resolve(&provider) {
-        Ok(p) => p,
-        Err(e) => return error_response(&e),
-    };
-    if !probe.requires_key() {
-        // Same pi-auth explanation as save_key (this one takes `provider`
-        // from the path instead of the body).
-        if !crate::pi::providers::is_local_provider(&provider) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": { "code": "validation", "message": "this provider authenticates through pi itself — manage the key with pi auth, not here", "field": "provider" }
-                })),
-            )
-                .into_response();
-        }
+    let id = provider.trim().to_string();
+    if !valid_provider_id(&id) || crate::pi::providers::is_local_provider(&id) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1085,8 +1264,18 @@ pub async fn delete_key(
         )
             .into_response();
     }
-    match crate::secrets::delete_key(&uid, probe.name()) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+    // Idempotent by design: removing a key that was never stored (or that
+    // only ever lived in pi's own auth) still succeeds. Only our store is
+    // touched — pi's auth.json is the user's own business.
+    let target = match Provider::resolve(&id) {
+        Ok(p) => p.name().to_string(),
+        Err(_) => id,
+    };
+    match crate::secrets::delete_key(&uid, &target) {
+        Ok(()) => {
+            s.pi.drop_child(&uid).await;
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
         Err(detail) => {
             eprintln!("key delete failed: {detail}");
             (
@@ -1113,16 +1302,95 @@ pub async fn cancel_turn(
         .into_response()
 }
 
-/// Key presence per keyed provider (never the keys themselves).
+/// Key presence per provider (never the keys themselves). Covers every id
+/// pi lists — not just the natively-managed ones — so the UI can offer
+/// paste/remove for the whole catalog. Presence counts keys pasted here
+/// (our store) as well as keys the user configured via `pi auth` itself.
 pub async fn key_status(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Extension(AuthedUser(uid)): Extension<AuthedUser>,
 ) -> impl IntoResponse {
-    let list: Vec<_> = Provider::keyed_ids()
+    let mut ids: Vec<String> = Provider::keyed_ids()
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    // Cached pi RPC (60 s TTL): after the first call this is a mutex read.
+    // Snapshot ids cover providers pi's live RPC omits (it only reports
+    // authenticated + local ones) so pasted keys are visible after reload,
+    // not just in the session that saved them.
+    if let Ok(sys) = s.pi.child("system").await {
+        if let Ok(models) = sys.models(&s.pi).await {
+            for (id, _) in crate::pi::providers::group_by_provider(&models) {
+                if !crate::pi::providers::is_local_provider(&id) && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    for id in crate::pi::providers::known_ids() {
+        if !crate::pi::providers::is_local_provider(&id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    let list: Vec<_> = ids
         .iter()
         .map(|id| {
-            serde_json::json!({ "provider": id, "has_key": crate::secrets::has_key(&uid, id) })
+            serde_json::json!({
+                "provider": id,
+                "has_key": crate::secrets::has_key(&uid, id)
+                    || crate::pi::providers::pi_auth_has(id),
+            })
         })
         .collect();
     (StatusCode::OK, Json(serde_json::json!({ "keys": list }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_ids_are_validated_for_key_routes() {
+        for good in ["anthropic", "openai", "google", "llama.cpp", "azure-openai", "x"] {
+            assert!(valid_provider_id(good), "{good}");
+        }
+        for bad in ["", "a b", "a/b", "../x", "x;rm", "a\"b", &"x".repeat(65)] {
+            assert!(!valid_provider_id(bad), "{bad:?}");
+        }
+    }
+
+    /// The turn-time key gate, without touching the network or the real
+    /// credential stores: an unknown id with no key anywhere fails closed
+    /// with the actionable code, never with an opaque pi error mid-turn.
+    /// (The fake id keeps pi_auth_has deterministic: no such entry can
+    /// exist in the user's pi auth file, and nothing stored it in ours.)
+    #[test]
+    fn keyless_unknown_providers_fail_closed() {
+        let err = match turn_provider("definitely-not-a-provider-xyz", "nobody") {
+            Ok(_) => panic!("unknown id should fail closed without a key"),
+            Err(r) => r,
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn key_gate_truth_table() {
+        // Loopback never needs a key; otherwise either store counts.
+        assert!(key_gate_passes(false, false, true));
+        assert!(key_gate_passes(true, false, false));
+        assert!(key_gate_passes(false, true, false));
+        assert!(key_gate_passes(true, true, false));
+        assert!(key_gate_passes(true, false, true));
+        assert!(!key_gate_passes(false, false, false));
+    }
+
+    #[test]
+    fn native_loopback_needs_no_key() {
+        let agent = turn_provider("ollama", "nobody").unwrap_or_else(|_| {
+            panic!("loopback providers never need keys")
+        });
+        assert_eq!(agent.name(), "ollama");
+        assert!(agent.default_model().is_some());
+    }
 }

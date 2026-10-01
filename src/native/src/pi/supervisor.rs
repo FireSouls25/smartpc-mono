@@ -196,8 +196,24 @@ impl PiSupervisor {
         // pi's stderr stays plain and JSONL-adjacent logs stay greppable.
         std_cmd.env_remove("FORCE_COLOR");
         if user_id != "system" {
+            // The opencode key predates the provider index (keys stored
+            // before it exist but are unlisted): keep resolving it directly
+            // so legacy installs never lose auth silently.
             if let Some(key) = crate::secrets::get_key(user_id, "opencode") {
                 std_cmd.env("OPENCODE_API_KEY", key);
+            }
+            // Every other key the user pasted through our UI reaches pi the
+            // way pi documents: `<PROVIDER>_API_KEY` in the child
+            // environment (`--api-key` "defaults to env vars" — verified
+            // live against `pi auth check`). Process env is inherited
+            // anyway; this covers keyring/file-stored keys, which otherwise
+            // would never arrive.
+            for pid in crate::secrets::user_providers(user_id) {
+                if pid != "opencode" {
+                    if let Some(key) = crate::secrets::get_key(user_id, &pid) {
+                        std_cmd.env(crate::secrets::env_var_name(&pid), key);
+                    }
+                }
             }
         }
         // Detached process group (Unix): a dead sidecar never strands pi

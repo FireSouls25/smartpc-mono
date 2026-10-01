@@ -44,20 +44,22 @@ pub(crate) async fn probe(id: &str) -> serde_json::Value {
             Ok(models) => serde_json::json!({
                 "id": id, "name": p.name(), "available": true,
                 "models": models, "default_model": p.default_model(),
-                "needs_key": needs_key(id), "context_window": p.context_window(),
+                "needs_key": needs_key(id), "key_paste": needs_key(id),
+                "context_window": p.context_window(),
                 "startable": supervise::startable(id), "installed": installed(id, true),
             }),
             Err(_) => serde_json::json!({
                 "id": id, "name": p.name(), "available": false,
                 "models": [], "default_model": p.default_model(),
-                "needs_key": needs_key(id), "context_window": p.context_window(),
+                "needs_key": needs_key(id), "key_paste": needs_key(id),
+                "context_window": p.context_window(),
                 "startable": supervise::startable(id), "installed": installed(id, false),
             }),
         },
         Err(_) => serde_json::json!({
             "id": id, "name": id, "available": false,
             "models": [], "default_model": "",
-            "needs_key": needs_key(id), "context_window": null,
+            "needs_key": needs_key(id), "key_paste": false, "context_window": null,
             "startable": supervise::startable(id), "installed": installed(id, false),
         }),
     }

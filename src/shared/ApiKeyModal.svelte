@@ -48,51 +48,65 @@
       </div>
       <div class="panel-body">
         <p class="muted mb-4 text-sm">{t("aikey.desc")}</p>
-        <form onsubmit={save} class="flex flex-col gap-3">
-          <div>
-            <label class="label" for="aikey-input">{m?.provider}</label>
-            <input
-              id="aikey-input"
-              class="field"
-              type="password"
-              required
-              minlength={8}
-              autocomplete="new-password"
-              placeholder={t("aikey.placeholder")}
-              bind:value={key}
-            />
-          </div>
-          {#if providers.keyError}
-            <p class="error-box">{providers.keyError}</p>
-          {/if}
-          <div class="flex justify-end gap-2">
-            {#if m?.hasKey}
-              <button
-                type="button"
-                class="btn btn-danger mr-auto"
-                disabled={providers.keyBusy}
-                onclick={() => void providers.deleteKey(m.provider)}
-              >
-                {t("aikey.remove")}
-              </button>
-            {/if}
+        {#if providers.keyNotice}
+          <p class="warn-box">{providers.keyNotice}</p>
+          <div class="mt-3 flex justify-end gap-2">
             <button
               type="button"
-              class="btn btn-ghost"
+              class="btn btn-primary"
               disabled={providers.keyBusy}
               onclick={close}
             >
-              {t("aikey.cancel")}
-            </button>
-            <button
-              type="submit"
-              class="btn btn-primary"
-              disabled={providers.keyBusy}
-            >
-              {providers.keyBusy ? t("common.loading") : t("aikey.save")}
+              {t("common.done")}
             </button>
           </div>
-        </form>
+        {:else}
+          <form onsubmit={save} class="flex flex-col gap-3">
+            <div>
+              <label class="label" for="aikey-input">{m?.provider}</label>
+              <input
+                id="aikey-input"
+                class="field"
+                type="password"
+                required
+                minlength={8}
+                autocomplete="new-password"
+                placeholder={t("aikey.placeholder")}
+                bind:value={key}
+              />
+            </div>
+            {#if providers.keyError}
+              <p class="error-box">{providers.keyError}</p>
+            {/if}
+            <div class="flex justify-end gap-2">
+              {#if m?.hasKey}
+                <button
+                  type="button"
+                  class="btn btn-danger mr-auto"
+                  disabled={providers.keyBusy}
+                  onclick={() => void providers.deleteKey(m.provider)}
+                >
+                  {t("aikey.remove")}
+                </button>
+              {/if}
+              <button
+                type="button"
+                class="btn btn-ghost"
+                disabled={providers.keyBusy}
+                onclick={close}
+              >
+                {t("aikey.cancel")}
+              </button>
+              <button
+                type="submit"
+                class="btn btn-primary"
+                disabled={providers.keyBusy}
+              >
+                {providers.keyBusy ? t("common.loading") : t("aikey.save")}
+              </button>
+            </div>
+          </form>
+        {/if}
       </div>
     </div>
   </div>

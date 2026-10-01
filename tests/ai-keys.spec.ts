@@ -13,7 +13,8 @@ test("opencode without key opens the key modal; bogus key errors", async ({
 
   const menus = page.locator("[data-selectmenu]");
   await menus.nth(0).getByRole("button").click();
-  await page.getByRole("option", { name: "opencode" }).click();
+  // Exact: the catalog now also lists opencode-go next to opencode.
+  await page.getByRole("option", { name: "opencode", exact: true }).click();
 
   // Centered modal asking for the key (not a silent select).
   await expect(page.getByRole("dialog")).toBeVisible({ timeout: 10000 });

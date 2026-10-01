@@ -29,11 +29,87 @@ pub fn account(user_id: &str, provider: &str) -> String {
 }
 
 fn env_key(provider: &str) -> Option<String> {
-    let var = format!(
+    std::env::var(env_var_name(provider))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+/// pi's exact provider→env table (packages/ai/src/env-api-keys.ts, pi
+/// 0.85.1). Generic `{ID}_API_KEY` derivation is WRONG for several entries
+/// (google→GEMINI_API_KEY, azure-openai-responses→AZURE_OPENAI_API_KEY,
+/// huggingface→HF_TOKEN), so this is mirrored verbatim — not derived.
+/// `github-copilot` (COPILOT_GITHUB_TOKEN) is listed for completeness but
+/// excluded from pasting below: it's a minted OAuth token, not an API key.
+const PI_KEY_ENV: &[(&str, &str)] = &[
+    ("ant-ling", "ANT_LING_API_KEY"),
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("azure-openai-responses", "AZURE_OPENAI_API_KEY"),
+    ("baseten", "BASETEN_API_KEY"),
+    ("cerebras", "CEREBRAS_API_KEY"),
+    ("cloudflare-ai-gateway", "CLOUDFLARE_API_KEY"),
+    ("cloudflare-workers-ai", "CLOUDFLARE_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("fireworks", "FIREWORKS_API_KEY"),
+    ("google", "GEMINI_API_KEY"),
+    ("google-vertex", "GOOGLE_CLOUD_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("huggingface", "HF_TOKEN"),
+    ("kimi-coding", "KIMI_API_KEY"),
+    ("minimax", "MINIMAX_API_KEY"),
+    ("minimax-cn", "MINIMAX_CN_API_KEY"),
+    ("mistral", "MISTRAL_API_KEY"),
+    ("moonshotai", "MOONSHOT_API_KEY"),
+    ("moonshotai-cn", "MOONSHOT_API_KEY"),
+    ("nvidia", "NVIDIA_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("opencode", "OPENCODE_API_KEY"),
+    ("opencode-go", "OPENCODE_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+    ("qwen-token-plan", "QWEN_TOKEN_PLAN_API_KEY"),
+    ("qwen-token-plan-cn", "QWEN_TOKEN_PLAN_CN_API_KEY"),
+    ("qwen-token-plan-individual", "QWEN_TOKEN_PLAN_API_KEY"),
+    ("radius", "RADIUS_API_KEY"),
+    ("together", "TOGETHER_API_KEY"),
+    ("vercel-ai-gateway", "AI_GATEWAY_API_KEY"),
+    ("xai", "XAI_API_KEY"),
+    ("xiaomi", "XIAOMI_API_KEY"),
+    ("xiaomi-token-plan-ams", "XIAOMI_TOKEN_PLAN_AMS_API_KEY"),
+    ("xiaomi-token-plan-cn", "XIAOMI_TOKEN_PLAN_CN_API_KEY"),
+    ("xiaomi-token-plan-sgp", "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+    ("zai", "ZAI_API_KEY"),
+    ("zai-coding-cn", "ZAI_CODING_CN_API_KEY"),
+];
+
+/// Providers pi authenticates some way other than a pastable API key
+/// (OAuth/subscription/IAM). Paste is refused for these with a pointer to
+/// `pi auth`; their turns keep working through pi's own credentials.
+fn no_paste_ids(id: &str) -> bool {
+    matches!(id, "github-copilot" | "openai-codex" | "amazon-bedrock")
+}
+
+/// Whether our UI may take an API key for this provider id.
+pub fn accepts_pasted_key(id: &str) -> bool {
+    !no_paste_ids(id) && PI_KEY_ENV.iter().any(|(pid, _)| *pid == id)
+}
+
+/// Ids pi authenticates some way other than a pastable key (see
+/// [`no_paste_ids`]): the UI must point at `pi auth`, not our key modal.
+pub fn pi_managed_only(id: &str) -> bool {
+    no_paste_ids(id)
+}
+
+/// Env var pi itself honors for a provider (`--api-key` "defaults to env
+/// vars" — verified live: `ANTHROPIC_API_KEY=… pi auth check` reports
+/// ready). Exact table hit first; generic derivation only as a fallback for
+/// custom (user-extension) providers pi lists live.
+pub fn env_var_name(provider: &str) -> String {
+    if let Some((_, var)) = PI_KEY_ENV.iter().find(|(pid, _)| *pid == provider) {
+        return var.to_string();
+    }
+    format!(
         "{}_API_KEY",
         provider.to_uppercase().replace('.', "_").replace('-', "_")
-    );
-    std::env::var(var).ok().filter(|v| !v.trim().is_empty())
+    )
 }
 
 fn force_file() -> bool {
@@ -62,6 +138,22 @@ pub fn has_key(user_id: &str, provider: &str) -> bool {
     get_key(user_id, provider).is_some()
 }
 
+/// True when WE hold the key in a managed backend (keyring or encrypted
+/// file) — deliberately ignoring the process environment, which is not
+/// ours to manage. Used to keep the provider index truthful on delete.
+fn backend_has(user_id: &str, provider: &str) -> bool {
+    if !force_file() {
+        if let Ok(entry) = keyring::Entry::new("smart-pc", &account(user_id, provider)) {
+            if let Ok(pw) = entry.get_password() {
+                if !pw.trim().is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    file_get(user_id, provider).is_some()
+}
+
 pub fn set_key(user_id: &str, provider: &str, key: &str) -> Result<(), String> {
     let key = key.trim();
     if key.len() < 8 {
@@ -74,6 +166,7 @@ pub fn set_key(user_id: &str, provider: &str, key: &str) -> Result<(), String> {
                     // Keyring won: drop any stale fallback entry so the two
                     // backends can never disagree.
                     let _ = file_delete(user_id, provider);
+                    let _ = index_add(user_id, provider);
                     return Ok(());
                 }
                 Err(e) => {
@@ -106,6 +199,7 @@ pub fn set_key(user_id: &str, provider: &str, key: &str) -> Result<(), String> {
 fn file_set_with_note(user_id: &str, provider: &str, key: &str, note: &str) -> Result<(), String> {
     match file_set(user_id, provider, key) {
         Ok(()) => {
+            let _ = index_add(user_id, provider);
             crate::diagnostics::push(format!("keys: {note}; used encrypted file instead"));
             Ok(())
         }
@@ -131,6 +225,14 @@ pub fn delete_key(user_id: &str, provider: &str) -> Result<(), String> {
             Some(ke) => Err(format!("keyring ({ke}) and file ({fe}) delete failed")),
         },
     }
+    .map(|()| {
+        // Only forget the provider when nothing managed still holds a key:
+        // a failed keyring delete above leaves a live entry behind, and the
+        // next spawn must keep injecting it.
+        if !backend_has(user_id, provider) {
+            let _ = index_remove(user_id, provider);
+        }
+    })
 }
 
 // --- Encrypted file backend ---------------------------------------------
@@ -139,6 +241,14 @@ pub fn delete_key(user_id: &str, provider: &str) -> Result<(), String> {
 struct SecretFile {
     salt: String,
     entries: BTreeMap<String, FileEntry>,
+    /// Provider ids this user pasted through our UI. Values stay in the
+    /// keyring / encrypted entries — the index holds ids only (never
+    /// secrets), because the keyring offers no listing API and the pi
+    /// supervisor needs the set at child-spawn time to inject
+    /// `<PROVIDER>_API_KEY` env vars. Old files lack the field (default);
+    /// file-backend entries are additionally parsed, so those self-heal.
+    #[serde(default)]
+    key_index: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -257,6 +367,66 @@ fn save_file(path: &Path, file: &SecretFile) -> Result<(), String> {
     std::fs::write(path, s).map_err(|e| format!("secrets write: {e}"))?;
     set_600(path);
     Ok(())
+}
+
+/// Every provider id we hold a key for, from the explicit index (covers
+/// the keyring backend) unioned with file-backend entries parsed by account
+/// name (covers pre-index files). Ids only — values are never listed.
+pub fn user_providers(user_id: &str) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(path) = secrets_file() else {
+        return Vec::new();
+    };
+    let Ok(_guard) = FILE_LOCK.lock() else {
+        return Vec::new();
+    };
+    let file = load_file(&path);
+    if let Some(indexed) = file.key_index.get(user_id) {
+        out.extend(indexed.iter().cloned());
+    }
+    let prefix = format!("{user_id}:");
+    for acct in file.entries.keys() {
+        if let Some(rest) = acct
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix("-api-key"))
+        {
+            out.insert(rest.to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn index_add(user_id: &str, provider: &str) -> Result<(), String> {
+    let Some(path) = secrets_file() else {
+        return Err("no secrets file location".into());
+    };
+    let _guard = FILE_LOCK
+        .lock()
+        .map_err(|_| "secrets lock poisoned".to_string())?;
+    let mut file = load_file(&path);
+    let entry = file.key_index.entry(user_id.to_string()).or_default();
+    if !entry.iter().any(|p| p == provider) {
+        entry.push(provider.to_string());
+        entry.sort();
+    }
+    save_file(&path, &file)
+}
+
+fn index_remove(user_id: &str, provider: &str) -> Result<(), String> {
+    let Some(path) = secrets_file() else {
+        return Ok(());
+    };
+    let _guard = FILE_LOCK
+        .lock()
+        .map_err(|_| "secrets lock poisoned".to_string())?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut file = load_file(&path);
+    if let Some(entry) = file.key_index.get_mut(user_id) {
+        entry.retain(|p| p != provider);
+    }
+    save_file(&path, &file)
 }
 
 fn file_set(user_id: &str, provider: &str, key: &str) -> Result<(), String> {
@@ -380,6 +550,59 @@ mod tests {
             get_key("alice", "probe-c").as_deref(),
             Some("alice-secret-12345")
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn env_var_names_follow_pi_convention() {
+        assert_eq!(env_var_name("anthropic"), "ANTHROPIC_API_KEY");
+        assert_eq!(env_var_name("openai"), "OPENAI_API_KEY");
+        assert_eq!(env_var_name("opencode"), "OPENCODE_API_KEY");
+        assert_eq!(env_var_name("llama.cpp"), "LLAMA_CPP_API_KEY");
+        assert_eq!(env_var_name("azure-openai"), "AZURE_OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn paste_gating_matches_pi_key_story() {
+        // API-key providers from pi's env table (incl. special-cased ones).
+        for id in ["anthropic", "openai", "google", "opencode", "huggingface", "xai"] {
+            assert!(accepts_pasted_key(id), "{id}");
+        }
+        // OAuth/subscription/IAM: refuse here, point at pi auth.
+        for id in ["github-copilot", "openai-codex", "amazon-bedrock"] {
+            assert!(!accepts_pasted_key(id), "{id}");
+            assert!(pi_managed_only(id), "{id}");
+        }
+        assert!(!pi_managed_only("anthropic"));
+        // Unknown ids are neither: save falls through to the live check.
+        assert!(!accepts_pasted_key("custom-gateway-xyz"));
+        assert!(!pi_managed_only("custom-gateway-xyz"));
+    }
+
+    #[test]
+    fn provider_index_tracks_set_and_delete() {
+        let (path, _guard) = test_env("index");
+        assert!(user_providers("u9").is_empty());
+        set_key("u9", "probe-x", "x-secret-12345").unwrap();
+        set_key("u9", "probe-y", "y-secret-12345").unwrap();
+        set_key("u9", "probe-x", "x-secret-rotated-1").unwrap();
+        set_key("other", "probe-x", "other-secret-12345").unwrap();
+        assert_eq!(user_providers("u9"), vec!["probe-x", "probe-y"]);
+        assert_eq!(user_providers("other"), vec!["probe-x"]);
+        delete_key("u9", "probe-x").unwrap();
+        assert_eq!(user_providers("u9"), vec!["probe-y"]);
+        // Ids are listed; values never are.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("x-secret"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn provider_index_includes_legacy_file_entries() {
+        let (path, _guard) = test_env("legacy");
+        // Bypass set_key: simulates a file written before the index existed.
+        file_set("u8", "legacy-p", "legacy-secret-123456").unwrap();
+        assert_eq!(user_providers("u8"), vec!["legacy-p"]);
         let _ = std::fs::remove_file(&path);
     }
 }

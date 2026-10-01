@@ -33,6 +33,7 @@ export const es = {
   "auth.logoutUnsynced":
     "Al salir no había conexión con la nube: tus últimos cambios quedaron guardados solo en este equipo. Se subirán la próxima vez que inicies sesión aquí.",
   "common.loading": "Cargando…",
+  "common.done": "Entendido",
   "common.hide": "Ocultar",
   "common.show": "Mostrar",
   "common.theme": "Tema",
@@ -49,6 +50,9 @@ export const es = {
   "chat.model": "Modelo",
   "chat.hello": "Hola, ¿qué hacemos hoy?",
   "chat.timeout": "La respuesta tardó demasiado; inténtalo de nuevo.",
+  "agent.title": "Conversación del agente",
+  "agent.connected": "Conectado",
+  "agent.ready": "Lista · razonando y sintetizando",
   "voice.unsupported": "Sin micrófono en este equipo; conecta uno para hablar.",
   "voice.error": "Falló el reconocimiento de voz; prueba de nuevo.",
   "voice.starting": "Iniciando voz local…",
@@ -61,6 +65,15 @@ export const es = {
     "El asistente está ocupado; tu texto quedó en el campo de entrada.",
   "voice.downloading": "Descargando el modelo de voz (solo la primera vez)…",
   "voice.mode": "Modo",
+  "voice.state": "Estado de voz",
+  "voice.stateIdle": "En reposo",
+  "voice.stateListening": "Escuchando",
+  "voice.stateCapturing": "Capturando",
+  "voice.stateStarting": "Iniciando",
+  "voice.shortWake": "Activación «{word}»",
+  "voice.shortConvo": "Conversación",
+  "voice.shortManual": "Manual",
+  "voice.mute": "Silenciar voz",
   "voice.modeManual": "Manual: pulsa para hablar",
   "voice.modeWake": "Palabra clave: escucha siempre",
   "voice.modeConvo": "Conversación: habla continua",
@@ -149,7 +162,7 @@ export const es = {
   "topbar.settings": "Ajustes",
   "protocol.mismatch":
     "El backend local no coincide con esta interfaz: recompila el sidecar (cargo build) y reinicia la app.",
-  "aikey.title": "API key de OpenCode",
+  "aikey.title": "Clave API del proveedor",
   "aikey.desc":
     "Se guarda cifrada en el almacén del sistema. Nunca sale de este equipo salvo hacia la API.",
   "aikey.placeholder": "Pega tu API key…",
@@ -158,6 +171,9 @@ export const es = {
   "aikey.add": "Añadir API key",
   "aikey.change": "Cambiar",
   "aikey.remove": "Quitar",
+  "aikey.piAuth": "Se configura con `pi auth` en la terminal",
+  "aikey.unverified":
+    "Guardada sin verificar: pi la probará en el primer uso. Si falla, revisa la clave.",
 } as const;
 
 export type I18nKey = keyof typeof es;

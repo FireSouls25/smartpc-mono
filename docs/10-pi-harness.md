@@ -90,11 +90,20 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► pi --mode rpc
   `context_window` from pi (strictly better: real values for Zen/llama.cpp);
   selection persists in sidecar as today → `set_model` per turn. Our
   `registerProvider` extension row adds ollama/llama.cpp/Zen endpoints so pi
-  works even without user pi config.
-- **Keys**: sidecar injects keyring keys as env for the pi child
-  (`OPENCODE_API_KEY` — verify exact name against pi's env map at
-  implementation; fallback: per-launch `models.json` with literal key in
-  userData 0600). Never log, never persist elsewhere.
+  works even without user pi config. Since the RPC only reports authenticated
+  + local providers, the endpoint appends pi's built-in registry from a
+  version-pinned repo snapshot (`src/native/assets/pi-models.json`,
+  regen via `scripts/regen-pi-models.mjs`) so the UI lists, validates, and
+  takes keys for the whole catalog — live data wins whenever present.
+- **Keys**: sidecar injects keyring/file keys as `<PROVIDER>_API_KEY` env for
+  the pi child, using pi's exact env table mirrored in `secrets.rs`
+  (`PI_KEY_ENV`, from pi's `packages/ai/src/env-api-keys.ts`, pi 0.85.1 —
+  generic derivation is wrong for google→GEMINI_API_KEY,
+  azure-openai-responses, huggingface→HF_TOKEN, so it's table-first).
+  Verified live: `ANTHROPIC_API_KEY=… pi auth check` reports ready, and a
+  pasted key was observed in the spawned child's environment. OAuth-only ids
+  (copilot, codex, bedrock) refuse paste with a `pi auth` pointer. Never
+  log, never persist elsewhere (the provider index lists ids only).
 - **Chat vs run**: pi has no "tool-less chat" per turn → **unify**: every
   turn may act; `steps` carries what happened (empty when pure chat). UI
   unchanged (it already renders steps). The "plain chat never creates

@@ -9,3 +9,5 @@ package-lock.json
 .claude/
 agent/
 skills-lock.json
+# Generated pi model snapshot (scripts/regen-pi-models.mjs owns the format).
+src/native/assets/pi-models.json

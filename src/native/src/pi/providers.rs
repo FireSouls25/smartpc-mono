@@ -7,6 +7,38 @@
 //! authenticates (its own `auth.json`); true otherwise, which routes the UI
 //! to our key modal for the one provider we manage (opencode).
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+/// pi's built-in model registry, snapshotted into the repo (see
+/// scripts/regen-pi-models.mjs + src/native/assets/pi-models.json). The live
+/// `get_available_models` RPC only reports authenticated + local providers,
+/// so without this the UI could never list — let alone validate — a provider
+/// the user hasn't authed yet. The live RPC always wins at runtime; the
+/// snapshot only fills the gaps. Regenerate on pi bumps.
+static SNAPSHOT: OnceLock<BTreeMap<String, Vec<String>>> = OnceLock::new();
+
+fn snapshot() -> &'static BTreeMap<String, Vec<String>> {
+    SNAPSHOT.get_or_init(|| {
+        serde_json::from_str::<serde_json::Value>(include_str!("../../assets/pi-models.json"))
+            .ok()
+            .and_then(|v| v.get("providers").cloned())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    })
+}
+
+/// Model ids pi ships for one provider, from the repo snapshot. Used for
+/// listing and select-time validation when the live RPC has nothing
+/// (unauthenticated provider); live data wins whenever present.
+pub fn known_models(id: &str) -> Option<Vec<String>> {
+    snapshot().get(id).cloned()
+}
+
+/// Every provider id pi's registry knows, live or not.
+pub fn known_ids() -> Vec<String> {
+    snapshot().keys().cloned().collect()
+}
 
 fn home_config_dir() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
@@ -94,6 +126,24 @@ pub fn max_context_window(models: &[&Value]) -> Option<u32> {
         .max()
 }
 
+/// Model ids pi lists for one provider: live RPC first, repo snapshot as
+/// fallback, None when neither knows the id. Select-time validation for
+/// pi-managed ids (turn hot paths never call this — membership was validated
+/// at select, and pi fails honestly).
+pub async fn models_for(state: &crate::api::AppState, id: &str) -> Option<Vec<String>> {
+    if let Ok(sys) = state.pi.child("system").await {
+        if let Ok(models) = sys.models(&state.pi).await {
+            if let Some(group) = group_by_provider(&models)
+                .into_iter()
+                .find(|(gid, _)| gid == id)
+            {
+                return Some(model_ids(&group.1));
+            }
+        }
+    }
+    known_models(id)
+}
+
 /// Full providers list in the current UI shape, sourced from pi's catalog
 /// with local-first availability preserved:
 /// - ollama / llama.cpp: today's live probe output verbatim (fresh models,
@@ -102,8 +152,11 @@ pub fn max_context_window(models: &[&Value]) -> Option<u32> {
 /// - everything else pi lists: models + context windows from pi,
 ///   `available: true` (configured), `needs_key` unless loopback or pi
 ///   already authenticates it (its own auth.json).
-/// On pi failure: degraded to the three local probes + diagnostics (the
-/// endpoint never hard-fails; the UI degrades to offline chips).
+/// - registry ids pi's live RPC omits (it only reports authenticated +
+///   local providers): models from the repo snapshot so the UI can list,
+///   validate, and take keys for the whole catalog, not just what's authed.
+/// On pi failure: degraded to the local probes + snapshot + diagnostics
+/// (the endpoint never hard-fails; the UI degrades to offline chips).
 pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
     let sys = match state.pi.child("system").await {
         Ok(c) => c,
@@ -125,6 +178,7 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
         tokio::join!(crate::ai::routes::probe("ollama"), crate::ai::routes::probe("llama.cpp"));
     out.push(ollama);
     out.push(llamacpp);
+    let mut live_ids: Vec<String> = Vec::new();
     for (id, group) in group_by_provider(&models) {
         if is_local_provider(&id) {
             continue;
@@ -134,6 +188,7 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
             .and_then(|m| m.get("baseUrl"))
             .and_then(|u| u.as_str());
         let loopback = is_loopback_url(base);
+        live_ids.push(id.clone());
         out.push(serde_json::json!({
             "id": id,
             "name": id,
@@ -141,12 +196,40 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
             "models": model_ids(&group),
             "default_model": "",
             "needs_key": !loopback && !pi_auth_has(&id),
+            // Paste is about OUR modal: loopback takes no keys at all, and
+            // OAuth/subscription ids refuse with a `pi auth` pointer.
+            "key_paste": !loopback && !crate::secrets::pi_managed_only(&id),
             "context_window": max_context_window(&group),
             "startable": false,
             "installed": null,
         }));
     }
+    append_snapshot_entries(&mut out, &live_ids);
     out
+}
+
+/// Registry ids missing from the live output (unauthenticated providers pi
+/// doesn't report): same shape, models from the snapshot, no context
+/// window (unknown until authed). `needs_key` still honors pi's own auth.
+fn append_snapshot_entries(out: &mut Vec<Value>, live_ids: &[String]) {
+    for id in known_ids() {
+        if live_ids.iter().any(|l| l == &id) || is_local_provider(&id) {
+            continue;
+        }
+        let models = known_models(&id).unwrap_or_default();
+        out.push(serde_json::json!({
+            "id": id,
+            "name": id,
+            "available": true,
+            "models": models,
+            "default_model": "",
+            "needs_key": !pi_auth_has(&id),
+            "key_paste": !crate::secrets::pi_managed_only(&id),
+            "context_window": null,
+            "startable": false,
+            "installed": null,
+        }));
+    }
 }
 
 async fn fallback() -> Vec<Value> {
@@ -155,7 +238,13 @@ async fn fallback() -> Vec<Value> {
         crate::ai::routes::probe("llama.cpp"),
         crate::ai::routes::probe("opencode"),
     );
-    vec![ollama, llamacpp, opencode]
+    let mut out = vec![ollama, llamacpp, opencode];
+    let live_ids = ["ollama", "llama.cpp", "opencode"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    append_snapshot_entries(&mut out, &live_ids);
+    out
 }
 
 #[cfg(test)]
@@ -169,6 +258,44 @@ mod tests {
             m["contextWindow"] = json!(w);
         }
         m
+    }
+
+    #[test]
+    fn snapshot_covers_the_registry() {
+        let ids = known_ids();
+        assert!(ids.len() >= 30, "snapshot shrank: {}", ids.len());
+        assert!(ids.contains(&"anthropic".to_string()));
+        assert!(ids.contains(&"opencode".to_string()));
+        let sorted = {
+            let mut s = ids.clone();
+            s.sort();
+            s
+        };
+        assert_eq!(ids, sorted, "known_ids must be deterministic");
+        let anthropic = known_models("anthropic").expect("snapshot has anthropic");
+        assert!(!anthropic.is_empty());
+        assert!(known_models("definitely-not-a-provider-xyz").is_none());
+    }
+
+    #[test]
+    fn snapshot_entries_skip_live_and_local() {
+        let mut out = Vec::new();
+        append_snapshot_entries(&mut out, &["anthropic".to_string()]);
+        let ids: Vec<String> = out
+            .iter()
+            .filter_map(|v| v.get("id")?.as_str().map(str::to_string))
+            .collect();
+        // Live-listed anthropic is not duplicated; loopback never appears.
+        assert!(!ids.contains(&"anthropic".to_string()));
+        assert!(!ids.iter().any(|id| is_local_provider(id)));
+        assert!(ids.contains(&"openai".to_string()));
+        // Shape matches the live entries the UI already renders.
+        for v in &out {
+            assert!(v.get("needs_key").and_then(|b| b.as_bool()).is_some());
+            assert!(v.get("key_paste").and_then(|b| b.as_bool()).is_some());
+            assert!(v.get("models").and_then(|m| m.as_array()).is_some());
+            assert_eq!(v.get("available"), Some(&serde_json::Value::Bool(true)));
+        }
     }
 
     #[test]

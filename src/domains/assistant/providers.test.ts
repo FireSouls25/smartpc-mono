@@ -9,6 +9,7 @@ const entry = (over: Partial<ProviderInfo>): ProviderInfo => ({
   models: ["m1", "m2"],
   default_model: "m1",
   needs_key: false,
+  key_paste: false,
   context_window: 8192,
   startable: true,
   installed: true,

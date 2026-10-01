@@ -317,13 +317,19 @@
                 ></span>
                 {p.id}
               </span>
-              <button
-                class="btn btn-ghost"
-                style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
-                onclick={() => providers.openKeyModal(p.id)}
-              >
-                {providers.keyStatus[p.id] ? t("aikey.change") : t("aikey.add")}
-              </button>
+              {#if p.key_paste}
+                <button
+                  class="btn btn-ghost"
+                  style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                  onclick={() => providers.openKeyModal(p.id)}
+                >
+                  {providers.keyStatus[p.id]
+                    ? t("aikey.change")
+                    : t("aikey.add")}
+                </button>
+              {:else}
+                <span class="faint text-xs">{t("aikey.piAuth")}</span>
+              {/if}
             </div>
           {/each}
         </div>

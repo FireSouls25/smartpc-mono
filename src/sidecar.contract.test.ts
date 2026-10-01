@@ -58,7 +58,10 @@ beforeAll(async () => {
       stdio: "ignore",
       // Hermetic: this spec pins shapes, and a developer with SUPABASE_*
       // exported must not have the sidecar proxy auth to a real project.
-      env: { ...process.env, SMARTPC_CLOUD: "0" },
+      // Same for pi auth: ambient ~/.pi/agent/auth.json must not flip
+      // needs_key / has_key under the assertions below (mirrors the
+      // PI_AUTH_FILE=/dev/null e2e isolation).
+      env: { ...process.env, SMARTPC_CLOUD: "0", PI_AUTH_FILE: "/dev/null" },
     },
   );
   await waitForHealth();
@@ -92,7 +95,14 @@ describe("sidecar contract", () => {
       providers: Record<string, unknown>[];
     };
     const ids = body.providers.map((p) => p["id"]).sort();
-    expect(ids).toEqual(["llama.cpp", "ollama", "opencode"]);
+    // Loopback trio always present; the rest is pi's registry (snapshot ids
+    // are in-repo, so this is deterministic — live groups only add more).
+    for (const id of ["llama.cpp", "ollama", "opencode"]) {
+      expect(ids).toContain(id);
+    }
+    for (const id of ["anthropic", "openai", "google", "mistral", "groq"]) {
+      expect(ids).toContain(id);
+    }
     for (const p of body.providers) {
       expect(typeof p["id"]).toBe("string");
       expect(typeof p["name"]).toBe("string");
@@ -100,6 +110,7 @@ describe("sidecar contract", () => {
       expect(Array.isArray(p["models"])).toBe(true);
       expect(typeof p["default_model"]).toBe("string");
       expect(typeof p["needs_key"]).toBe("boolean");
+      expect(typeof p["key_paste"]).toBe("boolean");
       expect(
         typeof p["context_window"] === "number" || p["context_window"] === null,
       ).toBe(true);
@@ -143,6 +154,74 @@ describe("sidecar contract", () => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("unauthorized");
+  });
+
+  test("provider keys validate ids and fail closed without keys", async () => {
+    const tag = `k${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    const postKey = (provider: string, key: string) =>
+      fetch(`${BASE}/v1/ai/keys`, {
+        method: "POST",
+        headers: authed,
+        body: JSON.stringify({ provider, key }),
+      });
+
+    // Shell-hostile ids never reach storage or env derivation.
+    for (const bad of ["!!nope", "a/b", ""]) {
+      const res = await postKey(bad, "long-enough-key-123");
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("validation");
+    }
+    // Loopback providers take no keys.
+    const local = await postKey("ollama", "long-enough-key-123");
+    expect(local.status).toBe(400);
+
+    // Unknown-but-sane id, no key anywhere: turns fail with the actionable
+    // code before any pi RPC (fake id keeps this deterministic: it can be
+    // in neither our store nor pi's auth file).
+    const sel = await fetch(`${BASE}/v1/ai/select`, {
+      method: "POST",
+      headers: authed,
+      body: JSON.stringify({ provider: "definitely-not-a-provider-xyz" }),
+    });
+    expect(sel.status).toBe(400);
+    const selBody = (await sel.json()) as { error: { code: string } };
+    expect(selBody.error.code).toBe("missing_key");
+
+    // Key presence shape holds; local accounts never hold keys here.
+    const ks = await fetch(`${BASE}/v1/ai/keys`, { headers: authed });
+    expect(ks.ok).toBe(true);
+    const ksBody = (await ks.json()) as {
+      keys: { provider: string; has_key: boolean }[];
+    };
+    expect(Array.isArray(ksBody.keys)).toBe(true);
+    for (const k of ksBody.keys) {
+      expect(typeof k.provider).toBe("string");
+      expect(typeof k.has_key).toBe("boolean");
+    }
+    const oc = ksBody.keys.find((k) => k.provider === "opencode");
+    expect(oc?.has_key).toBe(false);
   });
 
   test("cloud routes are gated and report the feature as off", async () => {

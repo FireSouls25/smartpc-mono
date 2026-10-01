@@ -33,6 +33,7 @@ export const en: Record<I18nKey, string> = {
   "auth.logoutUnsynced":
     "No cloud connection at sign-out: your latest changes are stored only on this device. They will upload next time you sign in here.",
   "common.loading": "Loading…",
+  "common.done": "Got it",
   "common.hide": "Hide",
   "common.show": "Show",
   "common.theme": "Theme",
@@ -49,6 +50,9 @@ export const en: Record<I18nKey, string> = {
   "chat.model": "Model",
   "chat.hello": "Hi, what shall we do today?",
   "chat.timeout": "The response took too long; try again.",
+  "agent.title": "Agent conversation",
+  "agent.connected": "Connected",
+  "agent.ready": "Ready · reasoning & synthesizing",
   "voice.unsupported": "No microphone on this machine; plug one in to talk.",
   "voice.error": "Voice recognition failed; try again.",
   "voice.starting": "Starting local voice…",
@@ -60,6 +64,15 @@ export const en: Record<I18nKey, string> = {
   "voice.busy": "The assistant is busy; your words are kept in the input.",
   "voice.downloading": "Downloading the voice model (first time only)…",
   "voice.mode": "Mode",
+  "voice.state": "Voice state",
+  "voice.stateIdle": "Idle",
+  "voice.stateListening": "Listening",
+  "voice.stateCapturing": "Capturing",
+  "voice.stateStarting": "Starting",
+  "voice.shortWake": "Wake «{word}»",
+  "voice.shortConvo": "Conversation",
+  "voice.shortManual": "Manual",
+  "voice.mute": "Mute voice",
   "voice.modeManual": "Manual: press to talk",
   "voice.modeWake": "Wake word: always listening",
   "voice.modeConvo": "Conversation: continuous talk",
@@ -145,7 +158,7 @@ export const en: Record<I18nKey, string> = {
   "topbar.settings": "Settings",
   "protocol.mismatch":
     "Local backend mismatch: rebuild the sidecar (cargo build) and restart the app.",
-  "aikey.title": "OpenCode API key",
+  "aikey.title": "Provider API key",
   "aikey.desc":
     "Stored encrypted in the system credential store. It never leaves this machine except toward the API.",
   "aikey.placeholder": "Paste your API key…",
@@ -154,4 +167,7 @@ export const en: Record<I18nKey, string> = {
   "aikey.add": "Add API key",
   "aikey.change": "Change",
   "aikey.remove": "Remove",
+  "aikey.piAuth": "Configured with `pi auth` in a terminal",
+  "aikey.unverified":
+    "Saved without verification: pi will test it on first use. If turns fail, check the key.",
 };
