@@ -222,6 +222,42 @@ describe("sidecar contract", () => {
     expect(body.cloud_account).toBe(false);
   });
 
+  test("logout is idempotent and answers ok", async () => {
+    const tag = `l${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { refresh_token: string };
+    // With the cloud off the flush is an instant no-op: logout stays fast.
+    const out = await fetch(`${BASE}/v1/auth/logout`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({ refresh_token: tokens.refresh_token }),
+    });
+    expect(out.ok).toBe(true);
+    expect(((await out.json()) as { ok: boolean }).ok).toBe(true);
+    // Unknown tokens still succeed (idempotent).
+    const unknown = await fetch(`${BASE}/v1/auth/logout`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({ refresh_token: "nope" }),
+    });
+    expect(unknown.ok).toBe(true);
+  });
+
   test("unstartable providers fail closed, deterministically", async () => {
     for (const id of ["llama.cpp", "nope"]) {
       const res = await fetch(

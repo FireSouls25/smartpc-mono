@@ -76,6 +76,11 @@ machine-specific), audio, and anything the agent reads off the machine.
   every cloud write is queued (one worker per user, ordered), fire-and-forget,
   and a failure is recorded in `last_error` instead of surfacing. Reads always
   hit SQLite. Offline is a normal state, not an error.
+- **Logout drains the queue first.** The one exception to fire-and-forget:
+  `POST /v1/auth/logout` waits (bounded, 20 s) for the user's pending pushes
+  to land _before_ the token is forgotten — otherwise a turn made seconds
+  before logout would never reach a second computer. On timeout logout still
+  succeeds; leftovers stay in SQLite and the next login repairs them.
 - **Ids are shared, not translated.** Cloud tables key on the sidecar's own
   hex ids (`text`), so an upsert is idempotent with no id-mapping table.
 - **RLS, not application filtering.** Every PostgREST call carries the

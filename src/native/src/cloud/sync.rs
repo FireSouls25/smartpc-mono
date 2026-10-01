@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::oneshot;
 
 use super::{parse_ts, Cloud};
 use crate::chat::model::{Action, ChatMessageRow, Selection, Session};
@@ -42,7 +43,9 @@ impl std::fmt::Display for SyncError {
 }
 
 /// One queued write. Ordered per user, applied one at a time.
-#[derive(Debug, Clone)]
+/// Deliberately not `Clone`: the `Flush` barrier holds a oneshot sender,
+/// and jobs are moved into the channel once, never duplicated.
+#[derive(Debug)]
 pub enum Job {
     Session {
         user_id: String,
@@ -65,6 +68,14 @@ pub enum Job {
         user_id: String,
         selection: Selection,
     },
+    /// Drain barrier: the worker answers once every job sent before it has
+    /// been processed. Never reaches the network — see the worker loop.
+    /// This is what logout waits on so "log out here, sign in over there"
+    /// actually carries the last turns with it.
+    Flush {
+        user_id: String,
+        ack: oneshot::Sender<()>,
+    },
 }
 
 impl Job {
@@ -74,7 +85,8 @@ impl Job {
             | Self::Messages { user_id, .. }
             | Self::Action { user_id, .. }
             | Self::DeleteSession { user_id, .. }
-            | Self::Selection { user_id, .. } => user_id,
+            | Self::Selection { user_id, .. }
+            | Self::Flush { user_id, .. } => user_id,
         }
     }
 }
@@ -259,6 +271,9 @@ impl Cloud {
                 )
                 .await?;
             }
+            // The worker answers barriers itself; reaching here means a
+            // direct call — a no-op, never a network request.
+            Job::Flush { .. } => return Ok(()),
         }
         self.note_pushed(1);
         Ok(())

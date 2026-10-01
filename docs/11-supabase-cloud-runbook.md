@@ -67,6 +67,10 @@ select * from public.profiles;          -- preferences per account
 
 - **Force a repair.** Settings → Account → "Sync now" (`POST /v1/cloud/sync`):
   pulls the cloud into SQLite, then pushes the whole local cache back.
+- **Logging out is safe to walk away from.** Logout drains the pending
+  write-through queue first (up to ~20 s), so the last turns are in Supabase
+  before the session ends. If the network is dead, logout still succeeds and
+  the next login pushes what is left.
 - **Turn it off** without uninstalling: set `SMARTPC_CLOUD=0`, or unset the
   key. The app falls back to local accounts and stops making requests.
 - **Rotate the key** in the dashboard and update `.env` / `supabase.json`.

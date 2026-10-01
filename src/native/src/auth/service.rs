@@ -354,11 +354,25 @@ pub async fn logout(refresh_token: &str, state: &AppState) -> Result<(), AuthErr
         store.get_refresh_token(&hash).ok().map(|rt| rt.user_id)
     };
     if let Some(uid) = owner {
+        // Final push BEFORE anything is revoked: the write-through queue is
+        // async, so a turn made seconds ago may not have reached Supabase
+        // yet. Draining with the still-valid token is what makes "log out
+        // here, sign in over there" carry the last turns with it. Bounded:
+        // a dead network must not hang logout; leftovers stay in SQLite
+        // and the next login repairs them via push_all.
+        if !state
+            .cloud
+            .flush_user(&uid, std::time::Duration::from_secs(20))
+            .await
+        {
+            eprintln!("cloud: logout flush timed out, local rows kept");
+        }
         let access = state.cloud.access_for(&uid);
         if cloud_is_active(state) {
             state.cloud.logout(access.as_deref()).await;
         }
         state.cloud.forget_token(&uid);
+        state.cloud.drop_queue(&uid);
     }
     Ok(())
 }
@@ -378,6 +392,7 @@ pub async fn delete_account(user_id: &str, state: &AppState) -> Result<(), AuthE
         let _ = store.revoke_all_user_tokens(user_id);
     }
     state.cloud.forget_token(user_id);
+    state.cloud.drop_queue(user_id);
     if cloud_is_active(state) {
         if let Err(e) = state.cloud.admin_delete_user(user_id).await {
             eprintln!("cloud account delete skipped: {e}");

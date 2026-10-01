@@ -21,7 +21,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use sync::Job;
 
@@ -262,6 +262,12 @@ impl Cloud {
         let cloud = self.clone();
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
+                // The drain barrier answers only: everything sent before it
+                // on this channel has been processed by now (FIFO).
+                if let Job::Flush { ack, .. } = job {
+                    let _ = ack.send(());
+                    continue;
+                }
                 let uid = job.user_id().to_string();
                 // Serialized: one job at a time, so a slow network never
                 // spawns a burst of requests for the same account.
@@ -280,6 +286,48 @@ impl Cloud {
             queues.insert(uid.to_string(), tx.clone());
         }
         Some(tx)
+    }
+
+    /// Drain this user's queue: returns once every job enqueued before the
+    /// call has been applied (or dropped as NoToken). Bounded by `timeout` —
+    /// a dead network must never hang logout; whatever is left stays in
+    /// SQLite and the next login repairs it via `push_all`.
+    /// Returns `true` when fully drained, `false` on timeout.
+    pub async fn flush_user(&self, uid: &str, timeout: Duration) -> bool {
+        if !self.is_enabled() {
+            return true;
+        }
+        let tx = {
+            let queues = match self.queues.lock() {
+                Ok(q) => q,
+                Err(_) => return true,
+            };
+            match queues.get(uid) {
+                Some(tx) if !tx.is_closed() => tx.clone(),
+                // No worker, no pending jobs: already drained.
+                _ => return true,
+            }
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if tx
+            .send(Job::Flush {
+                user_id: uid.to_string(),
+                ack: ack_tx,
+            })
+            .is_err()
+        {
+            return true;
+        }
+        tokio::time::timeout(timeout, ack_rx).await.is_ok()
+    }
+
+    /// Drop this user's queue so its worker task can exit. Pending jobs are
+    /// abandoned (call `flush_user` first when they matter). Used on logout
+    /// (after the flush) and account deletion.
+    pub fn drop_queue(&self, uid: &str) {
+        if let Ok(mut queues) = self.queues.lock() {
+            queues.remove(uid);
+        }
     }
 }
 
@@ -358,5 +406,158 @@ mod tests {
         );
         assert!(parse_ts("2026-09-29T12:00:00Z") > parse_ts("2026-09-29T11:59:59Z"));
         assert!(parse_ts("nonsense").is_none());
+    }
+
+    #[tokio::test]
+    async fn flush_with_no_queue_is_already_drained() {
+        // Disabled cloud: nothing to do, never blocks.
+        assert!(
+            Cloud::new(None)
+                .flush_user("u1", Duration::from_secs(5))
+                .await
+        );
+        // Enabled cloud, but this user never enqueued: no worker, no wait.
+        let c = Cloud::new(Some(CloudConfig::new("https://abc.supabase.co", "k")));
+        assert!(c.flush_user("u1", Duration::from_secs(5)).await);
+        // Dropping a nonexistent queue is a no-op, never panics.
+        c.drop_queue("u1");
+    }
+
+    /// A fake PostgREST: records every request so the test can prove the
+    /// worker applies queued jobs serially, in order, and that `flush_user`
+    /// only returns once all of them landed.
+    async fn fake_postgrest(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        delay: Duration,
+    ) -> String {
+        let app = axum::Router::new().route(
+            "/rest/v1/{table}",
+            axum::routing::any(
+                move |axum::extract::Path(table): axum::extract::Path<String>,
+                      _req: axum::extract::Request| async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let method = _req.method().clone();
+                    seen.lock().unwrap().push(format!("{method} {table}"));
+                    axum::http::StatusCode::OK
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn queued_pushes_apply_in_order_and_flush_waits_for_them() {
+        use crate::chat::model::{Action, ChatMessageRow, Selection, Session};
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = fake_postgrest(seen.clone(), Duration::ZERO).await;
+        let cloud = std::sync::Arc::new(Cloud::new(Some(CloudConfig::new(&base, "test-anon"))));
+        cloud.remember_token("u1", "tok", 3600);
+
+        let ts = "2026-01-01T00:00:00Z".to_string();
+        cloud.enqueue(Job::Session {
+            user_id: "u1".into(),
+            session: Session {
+                id: "s1".into(),
+                title: "Hola".into(),
+                provider: "ollama".into(),
+                model: None,
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            },
+        });
+        cloud.enqueue(Job::Messages {
+            user_id: "u1".into(),
+            session_id: "s1".into(),
+            rows: vec![
+                ChatMessageRow {
+                    id: "m1".into(),
+                    role: "user".into(),
+                    content: "hola".into(),
+                    created_at: ts.clone(),
+                },
+                ChatMessageRow {
+                    id: "m2".into(),
+                    role: "assistant".into(),
+                    content: "buenas".into(),
+                    created_at: ts.clone(),
+                },
+            ],
+        });
+        cloud.enqueue(Job::Action {
+            user_id: "u1".into(),
+            row: Action {
+                id: "a1".into(),
+                session_id: Some("s1".into()),
+                kind: "open_app".into(),
+                title: "Abrir".into(),
+                status: "done".into(),
+                created_at: ts.clone(),
+                updated_at: ts.clone(),
+            },
+        });
+        cloud.enqueue(Job::DeleteSession {
+            user_id: "u1".into(),
+            session_id: "s2".into(),
+        });
+        cloud.enqueue(Job::Selection {
+            user_id: "u1".into(),
+            selection: Selection {
+                provider: "ollama".into(),
+                model: Some("llama3.1".into()),
+            },
+        });
+
+        assert!(cloud.flush_user("u1", Duration::from_secs(10)).await);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "POST chat_sessions",
+                "POST chat_messages",
+                "POST chat_messages",
+                "POST actions",
+                "DELETE chat_sessions",
+                "POST profiles",
+            ]
+        );
+        assert_eq!(cloud.status().pushed, 5);
+        cloud.drop_queue("u1");
+    }
+
+    #[tokio::test]
+    async fn flush_times_out_instead_of_hanging_logout() {
+        use crate::chat::model::Session;
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // A wedged network: every push outlives the flush budget.
+        let base = fake_postgrest(seen, Duration::from_secs(30)).await;
+        let cloud = std::sync::Arc::new(Cloud::new(Some(CloudConfig::new(&base, "test-anon"))));
+        cloud.remember_token("u1", "tok", 3600);
+
+        let ts = "2026-01-01T00:00:00Z".to_string();
+        cloud.enqueue(Job::Session {
+            user_id: "u1".into(),
+            session: Session {
+                id: "s1".into(),
+                title: "Hola".into(),
+                provider: "ollama".into(),
+                model: None,
+                created_at: ts.clone(),
+                updated_at: ts,
+            },
+        });
+        assert!(!cloud.flush_user("u1", Duration::from_millis(200)).await);
+        cloud.drop_queue("u1");
     }
 }
