@@ -29,7 +29,13 @@ use crate::{
 
 /// Protocol version: bump on any incompatible HTTP contract change.
 /// The UI compares it on boot and warns on mismatch (stale sidecar/app).
-pub const PROTOCOL: u32 = 3;
+///
+/// v4 (single bump per the merge order): `GET/PUT /v1/prefs/risky-input`,
+/// `GET /v1/support/audit-export`, `RunBody.preview`, `type_text.maxLength`
+/// 200, plus the T3 voice fold-in (`speak.{voice,model}`,
+/// `GET /v1/voice/tts-models`). T1/T2 surfaces ride free (no shape change);
+/// no second bump for T3.
+pub const PROTOCOL: u32 = 4;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -102,7 +108,13 @@ fn cors_layer() -> CorsLayer {
     // security boundary, so any local origin may call it.
     CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -144,6 +156,14 @@ pub fn router(state: AppState) -> Router {
             get(crate::chat::routes::key_status).post(crate::chat::routes::save_key),
         )
         .route("/v1/ai/keys/{id}", delete(crate::chat::routes::delete_key))
+        .route(
+            "/v1/prefs/risky-input",
+            get(crate::chat::routes::get_risky_input).put(crate::chat::routes::put_risky_input),
+        )
+        .route(
+            "/v1/support/audit-export",
+            get(crate::chat::routes::audit_export),
+        )
         .route("/v1/cloud/status", get(crate::cloud::routes::status))
         .route("/v1/cloud/sync", post(crate::cloud::routes::sync))
         .merge(user_routes)
@@ -163,6 +183,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/voice/stop", post(crate::stt::routes::stop))
         .route("/v1/voice/events", get(crate::stt::routes::events))
         .route("/v1/voice/speak", post(crate::stt::routes::speak))
+        .route("/v1/voice/tts-models", get(crate::stt::routes::tts_models))
         .route("/v1/voice/speak-stop", post(crate::stt::routes::speak_stop))
         .route(
             "/v1/voice/models/{name}",

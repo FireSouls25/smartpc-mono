@@ -50,6 +50,25 @@ pub struct TurnContext {
     pub chat_session_id: String,
 }
 
+/// T2 confirmation hook (G1): a pending Medium/High confirmation waiting
+/// on the future renderer surface. The dialog UI + push endpoint are
+/// unscheduled, so until they land every pending confirmation resolves
+/// deny-by-default (120 s timeout → deny). T4 + renderer consume this
+/// channel; no turn-scaffolding changes here.
+// Dead until T4 + renderer consume the channel (scheduled consumer).
+#[allow(dead_code)]
+pub(crate) const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PendingConfirm {
+    pub id: String,
+    pub tool: String,
+    /// Redacted arg summary (open_url query already stripped upstream).
+    pub args_summary: String,
+    pub risk: String,
+}
+
 #[derive(Debug)]
 pub enum PiError {
     Unavailable(String),
@@ -88,6 +107,11 @@ pub(crate) struct ChildHandle {
     /// pi session file → turn context. Files are stable across restarts, so
     /// entries outlive turns; re-inserted (overwritten) every turn.
     sessions: Mutex<HashMap<String, TurnContext>>,
+    /// Pending Medium/High confirmations (T2 G1 channel). Queued by the
+    /// confirmation hook, resolved deny-by-default until the renderer
+    /// surface lands.
+    #[allow(dead_code)]
+    pending_confirm: Mutex<Vec<PendingConfirm>>,
 }
 
 #[derive(Clone)]
@@ -251,6 +275,7 @@ impl PiSupervisor {
             turn_lock: AsyncMutex::new(()),
             catalog: AsyncMutex::new((None, Vec::new())),
             sessions: Mutex::new(HashMap::new()),
+            pending_confirm: Mutex::new(Vec::new()),
             exited: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
         });
@@ -343,8 +368,9 @@ impl PiSupervisor {
     }
 
     /// v1 policy: our bridge tools never prompt (policy lives in Rust
-    /// exec). Deny dialogs, ignore fire-and-forget. A UI confirmation hook
-    /// can replace this later without touching turns.
+    /// exec). Deny dialogs, ignore fire-and-forget. The pending-
+    /// confirmation channel above replaces this once the UI lands,
+    /// without touching turns.
     async fn answer_ui(handle: &Arc<ChildHandle>, req: &Value) {
         let id = req.get("id").and_then(|i| i.as_str()).unwrap_or("");
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -433,6 +459,38 @@ impl ChildHandle {
     /// Consume a pending cancel request (if any).
     pub(crate) fn take_cancel(&self) -> bool {
         self.cancel.swap(false, Ordering::SeqCst)
+    }
+
+    /// Queue a pending confirmation for the future renderer surface (T2 G1
+    /// channel). v1 never approves: deny-by-default until the UI lands.
+    #[allow(dead_code)]
+    pub(crate) fn queue_confirmation(&self, confirm: PendingConfirm) {
+        if let Ok(mut q) = self.pending_confirm.lock() {
+            // Cap the queue: stale entries must not pile up behind turns.
+            if q.len() < 16 {
+                q.push(confirm);
+            }
+        }
+    }
+
+    /// Take (consume) a pending confirmation by id. Returns None when
+    /// unknown — callers treat that as denied.
+    #[allow(dead_code)]
+    pub(crate) fn take_confirmation(&self, id: &str) -> Option<PendingConfirm> {
+        self.pending_confirm
+            .lock()
+            .ok()
+            .and_then(|mut q| q.iter().position(|c| c.id == id).map(|i| q.remove(i)))
+    }
+
+    /// Deny-by-default resolver: v1 has no trusted renderer gesture, so
+    /// nothing ever approves (120 s timeout → deny, see CONFIRM_TIMEOUT).
+    /// The renderer confirmation surface + T4 policy flip replace this
+    /// body without touching turns.
+    #[allow(dead_code)]
+    pub(crate) fn resolve_confirmation(&self, id: &str, _approved: bool) -> bool {
+        self.take_confirmation(id);
+        false
     }
 
     /// Send one command, await its correlated response (caller picks timeout).
@@ -583,6 +641,23 @@ mod tests {
             Some(v) => std::env::set_var("PI_BIN", v),
             None => std::env::remove_var("PI_BIN"),
         }
+    }
+
+    #[test]
+    fn pending_confirmation_is_deny_by_default() {
+        // Channel contract T4 + renderer will consume: 120 s timeout,
+        // redacted summary, deny-by-default resolver (resolve path is
+        // exercised live once the UI surface lands).
+        assert_eq!(CONFIRM_TIMEOUT, Duration::from_secs(120));
+        let p = PendingConfirm {
+            id: "confirm-1".to_string(),
+            tool: "open_url".to_string(),
+            args_summary: "https://example.com/a".to_string(),
+            risk: "Medium".to_string(),
+        };
+        // Redacted summaries never carry a query string.
+        assert!(!p.args_summary.contains('?'));
+        assert_eq!(p.tool, "open_url");
     }
 
     #[test]

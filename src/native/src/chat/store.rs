@@ -507,6 +507,69 @@ impl ChatStore {
         )?;
         Ok(())
     }
+
+    // ---------------------------------------------------------------------
+    // Prefs (T4 D5). Plain preference strings, never secrets. The risky
+    // toggle is advisory storage only: `Policy::for_user` ORs it with the
+    // env var per tool call, and the server refuses writes while the env
+    // var manages the machine (so an Off can never read as an On).
+    // ---------------------------------------------------------------------
+
+    pub fn get_pref(&self, user_id: &str, key: &str) -> rusqlite::Result<Option<String>> {
+        // Tolerate pre-migration databases (table missing → no pref).
+        let mut stmt = match self.conn.prepare(
+            "SELECT value FROM prefs WHERE user_id = ?1 AND key = ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let mut rows = stmt.query(params![user_id, key])?;
+        match rows.next()? {
+            Some(r) => Ok(Some(r.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_pref(&self, user_id: &str, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO prefs(user_id, key, value, updated_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(user_id, key) DO UPDATE SET value = ?3, updated_at = ?4",
+            params![user_id, key, value, now()],
+        )?;
+        Ok(())
+    }
+
+    /// This user's messages + actions for one session, oldest first, for
+    /// the audit export (T4 G5). Redaction happens at the route layer.
+    pub fn audit_lines(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        // Ownership check doubles as the 404 (caller checks first; this
+        // keeps the export honest even if it forgets).
+        let owned: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_sessions WHERE id = ?1 AND user_id = ?2",
+            params![session_id, user_id],
+            |r| r.get(0),
+        )?;
+        if owned == 0 {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT role, content, created_at FROM chat_messages
+             WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 fn row_to_action(r: &rusqlite::Row<'_>) -> rusqlite::Result<Action> {

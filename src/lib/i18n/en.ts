@@ -62,7 +62,16 @@ export const en: Record<I18nKey, string> = {
   "voice.sayHey": "Say “{word}” to start",
   "voice.speak": "Read replies aloud",
   "voice.speaking": "Speaking…",
-  "voice.speakHint": "Uses the system voice. First use downloads ~21 MB.",
+  "voice.speakHint":
+    "Local Piper voice, offline. First use downloads the model (~60 MB).",
+  "voice.ttsVoice": "Reading voice",
+  "voice.ttsVoiceHint":
+    "Per-language Piper voice. Stored on this device; the server keeps none.",
+  "voice.testPlay": "Test voice",
+  "voice.testing": "Playing test…",
+  "voice.downloadingTts": "Downloading the voice model (first time only)…",
+  "voice.testPhrase": "Hi, this is the Smart PC reading voice in English.",
+  "voice.chunkProgress": "● {i}/{n}",
   "voice.busy": "The assistant is busy; your words are kept in the input.",
   "voice.downloading": "Downloading the voice model (first time only)…",
   "voice.mode": "Mode",
@@ -172,4 +181,12 @@ export const en: Record<I18nKey, string> = {
   "aikey.piAuth": "Configured with `pi auth` in a terminal",
   "aikey.unverified":
     "Saved without verification: pi will test it on first use. If turns fail, check the key.",
+  "settings.riskyTitle": "PC control",
+  "settings.riskyLabel": "Allow PC control (keyboard, mouse, screenshots)",
+  "settings.riskyHint":
+    "Lets the assistant type, move the mouse and capture the screen. Trusted sessions only.",
+  "settings.riskyEnv":
+    "Managed by the administrator (HARNESS_ALLOW_RISKY): the switch is disabled.",
+  "settings.auditExport": "Download session audit",
+  "preview.prefix": "Preview",
 };

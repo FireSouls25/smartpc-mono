@@ -26,8 +26,8 @@ Example: user \"open firefox\" → you call open_app → you summarize. Later us
 - Never quote tool payloads verbatim in replies; summarize outcomes in your own words.\n\
 \n\
 CAPABILITIES (reliable on all three OSs — use confidently, do not decline these)\n\
-- open_app launches applications; close_app terminates them by name (never its own backend); list_processes inspects the process table; get_system_context reports OS, CPU, memory, session and focused app.\n\
-- Only press_key/type_text are gated (Wayland approval, macOS permissions, risky-text policy).\n\
+- open_app launches applications; close_app terminates them by name (never its own backend); list_processes inspects the process table; get_system_context reports OS, CPU, memory, session and focused app; get_display_info reports monitors; capture_screen takes a pixel screenshot (in-memory reference only, secrets-denied).\n\
+- Only press_key/type_text/capture_screen are gated (Wayland approval, macOS permissions, risky-text policy).\n\
 \n\
 OS INTERACTION GUIDE ({os}/{session})\n\
 {guide}\n",
@@ -45,6 +45,13 @@ pub fn turn_context(ctx: &SystemContext, lang: &str) -> String {
         super::context::render(ctx),
         if lang == "en" { "English" } else { "Spanish" },
     )
+}
+
+/// Per-turn path: facts come from the 5 s TTL cache (targeted refreshes,
+/// never a full re-probe per turn).
+pub fn turn_context_cached(lang: &str) -> String {
+    let ctx = super::context::gather_cached();
+    turn_context(&ctx, lang)
 }
 /// NOTE (measured 2026-09, gemma-class small models): keep mapping-style
 /// examples ('X' → tool) OUT of both the prompt and the tool descriptions.
@@ -100,6 +107,25 @@ mod tests {
                 injection: "restricted".into(),
                 detail: "gated".into(),
             },
+            hostname: "testbox".into(),
+            uptime_s: 7322,
+            load_avg: [0.5, 0.4, 0.3],
+            mem: crate::harness::context::MemoryDetail {
+                total_mb: 16000,
+                available_mb: 8000,
+                used_pct: 50,
+            },
+            cpu: crate::harness::context::CpuDetail {
+                logical: 8,
+                physical: Some(4),
+                brand: "Test CPU".into(),
+                usage_pct: 12.0,
+            },
+            displays: crate::harness::context::DisplaySummary {
+                count: 1,
+                primary: "Display 0".into(),
+            },
+            screen_runnable: true,
         }
     }
 
@@ -129,5 +155,23 @@ mod tests {
         let t = turn_context(&fake_ctx(), "es");
         assert!(t.contains("Spanish"));
         assert!(t.contains("Firefox"));
+    }
+
+    #[test]
+    fn static_prompt_advertises_grounding_tools() {
+        let p = static_prompt(&fake_ctx());
+        assert!(p.contains("get_display_info"));
+        assert!(p.contains("capture_screen"));
+    }
+
+    #[test]
+    fn cached_turn_context_carries_grounding_without_hostname() {
+        let t = turn_context_cached("es");
+        assert!(t.contains("mem:"));
+        assert!(t.contains("displays:"));
+        let host = crate::harness::context::gather_cached().hostname;
+        if !host.is_empty() {
+            assert!(!t.contains(&host), "hostname must stay tool-JSON-only");
+        }
     }
 }

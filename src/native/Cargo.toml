@@ -35,6 +35,11 @@ libc = "0.2"
 cpal = "0.18"
 whisper-rs = "0.16"
 sysinfo = "0.39.6"
+# T1 grounding: OS screen enumeration + capture (screenshots 0.2: full-display
+# PNG only, no names/primary flags — see harness/screen.rs) + decode/downscale
+# (image, PNG codec only; no model/ONNX).
+screenshots = "0.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 active-win-pos-rs = "0.11.0"
 enigo = "0.6"
 keyring = "4.2.0"

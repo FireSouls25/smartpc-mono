@@ -27,6 +27,11 @@ pub struct TurnInput {
     pub model: String,
     /// Full user content: fresh machine context + message (+ turn reminder).
     pub message: String,
+    /// `POST /v1/ai/run {preview:true}` (T4 G3): Medium/High tools answer
+    /// with a preview title, no side effect, no Action row.
+    pub dry_run: bool,
+    /// Turn language for preview titles.
+    pub lang: String,
 }
 
 pub struct TurnOutput {
@@ -75,6 +80,27 @@ fn records_action(tool: &str) -> bool {
         .iter()
         .find(|t| t.name == tool)
         .is_some_and(|t| t.records_action)
+}
+
+/// Whether a tool start becomes an Action row. Dry-run previews (T4 G3:
+/// Medium/High in a preview turn) record nothing — the step still lands in
+/// the trace with its preview title, but the left pane stays truthful.
+fn should_record(tool: &str, dry_run: bool) -> bool {
+    if !records_action(tool) {
+        return false;
+    }
+    if !dry_run {
+        return true;
+    }
+    !crate::harness::tools::catalog()
+        .iter()
+        .find(|t| t.name == tool)
+        .is_some_and(|t| {
+            matches!(
+                t.risk,
+                crate::harness::tools::Risk::Medium | crate::harness::tools::Risk::High
+            )
+        })
 }
 
 fn action_started(
@@ -159,6 +185,19 @@ mod tests {
         assert!(action_started(&chat, "s", &uid, "get_system_context", "Ctx").is_none());
         assert!(action_started(&chat, "s", &uid, "nope", "Nope").is_none());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn preview_turns_record_no_actions() {
+        // Live turns record mutating tools; dry-run previews (Medium/High)
+        // record nothing, while ReadOnly/Low still do.
+        assert!(should_record("open_app", false));
+        // Low tools really execute in dry-run, so their rows stay.
+        assert!(should_record("open_app", true));
+        assert!(!should_record("mouse_click", true));
+        assert!(should_record("press_key", false));
+        assert!(!should_record("get_system_context", true));
+        assert!(!should_record("get_system_context", false));
     }
 
     #[test]
@@ -277,6 +316,9 @@ async fn run_turn_inner(
         &input.session_title,
     )
     .await?;
+    // Fresh per-turn counters (session caps carry over); the bridge charges
+    // every tool call against this until the next turn.
+    super::routes::reset_turn_budget(&pi_file, input.dry_run, &input.lang);
     // Register for the tool callback endpoint (stable across restarts).
     sup.map_session(
         &input.user_id,
@@ -367,14 +409,30 @@ async fn run_turn_inner(
                             "pi called unregistered tool: {tool}"
                         )));
                     }
-                    let title = crate::harness::tools::title_for(&tool, &args);
-                    let action_id = action_started(
-                        chat,
-                        &input.chat_session_id,
-                        &input.user_id,
-                        &tool,
-                        &title,
-                    );
+                    let title = if input.dry_run
+                        && crate::harness::tools::catalog().iter().any(|t| {
+                            t.name == tool
+                                && matches!(
+                                    t.risk,
+                                    crate::harness::tools::Risk::Medium
+                                        | crate::harness::tools::Risk::High
+                                )
+                        }) {
+                        crate::harness::tools::preview_title(&tool, &args, &input.lang)
+                    } else {
+                        crate::harness::tools::title_for(&tool, &args)
+                    };
+                    let action_id = if should_record(&tool, input.dry_run) {
+                        action_started(
+                            chat,
+                            &input.chat_session_id,
+                            &input.user_id,
+                            &tool,
+                            &title,
+                        )
+                    } else {
+                        None
+                    };
                     pending_steps.insert(
                         call_id,
                         PendingStep {

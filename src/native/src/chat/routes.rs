@@ -350,9 +350,10 @@ pub async fn chat(
     }
 
     // Every turn may act (steps ignored on this endpoint); the chat endpoint
-    // never carried a language: default like everywhere.
+    // never carried a language: default like everywhere. Plain chat never
+    // previews (no preview flag on ChatBody).
     let done = match pi_chat_turn(
-        &s, &uid, &session_id, &prov_name, &model_name, &message, "es",
+        &s, &uid, &session_id, &prov_name, &model_name, &message, "es", false,
     )
     .await
     {
@@ -740,6 +741,9 @@ pub struct RunBody {
     pub model: Option<String>,
     pub message: String,
     pub lang: Option<String>,
+    /// T4 G3 dry-run: Medium/High tools answer with a preview title, no
+    /// side effect, no Action row. ReadOnly/Low execute normally.
+    pub preview: Option<bool>,
 }
 
 /// Agentic run: pi reasons with tools (Rust executes, policy-gated) until
@@ -860,8 +864,9 @@ pub async fn run(
         .filter(|l| !l.trim().is_empty())
         .unwrap_or("es");
     let ctx_window = agent.context_window();
+    let dry_run = b.preview.unwrap_or(false);
     let done = match pi_chat_turn(
-        &s, &uid, &session_id, &prov_name, &model, &message, lang,
+        &s, &uid, &session_id, &prov_name, &model, &message, lang, dry_run,
     )
     .await
     {
@@ -913,6 +918,7 @@ async fn pi_chat_turn(
     model: &str,
     message: &str,
     lang: &str,
+    dry_run: bool,
 ) -> Result<PiTurnDone, Response> {
     use crate::pi::turn::{run_turn, TurnInput};
     // Safety net matching turn_provider's gate: non-loopback providers need
@@ -963,6 +969,8 @@ async fn pi_chat_turn(
             provider: prov_name.to_string(),
             model: model.to_string(),
             message: full_message,
+            dry_run,
+            lang: lang.to_string(),
         },
     )
     .await
@@ -1016,7 +1024,15 @@ async fn pi_chat_turn(
         out.steps
             .iter()
             .map(|t| {
-                let args: String = t.args.to_string().chars().take(80).collect();
+                // T2 P0-a(4): the query string is dropped everywhere, not
+                // truncated — the generic arg dump would leak it (the args
+                // carry the raw URL, so open_url steps log the redacted
+                // host+path form instead).
+                let args: String = if t.tool == "open_url" {
+                    crate::harness::tools::short_link(&t.args)
+                } else {
+                    t.args.to_string().chars().take(80).collect()
+                };
                 format!("{}:{}:{}", t.tool, t.ok, args)
             })
             .collect::<Vec<_>>(),
@@ -1346,6 +1362,228 @@ pub async fn key_status(
     (StatusCode::OK, Json(serde_json::json!({ "keys": list }))).into_response()
 }
 
+/// Env-managed machine: the toggle is pinned (never an Off that behaves
+/// as On) and writes are refused with an honest code.
+fn risky_env_managed() -> bool {
+    std::env::var("HARNESS_ALLOW_RISKY").ok().as_deref() == Some("1")
+}
+
+fn risky_allowed(store: &ChatStore, uid: &str) -> (bool, &'static str) {
+    if risky_env_managed() {
+        return (true, "env");
+    }
+    let on = store
+        .get_pref(uid, "allow_risky_input")
+        .ok()
+        .flatten()
+        .is_some_and(|v| v == "1");
+    (on, if on { "toggle" } else { "none" })
+}
+
+/// T4 D5: read the risky-input toggle. `{allowed, source: toggle|env|none}`.
+/// The renderer mirror is non-authoritative: `Policy::for_user` re-resolves
+/// env-OR-toggle on every tool call.
+pub async fn get_risky_input(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+) -> impl IntoResponse {
+    let store = match lock_chat(&s) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    let (allowed, source) = risky_allowed(&store, &uid);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "allowed": allowed, "source": source })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RiskyBody {
+    pub allowed: bool,
+}
+
+/// T4 D5: flip the risky-input toggle. Enabling should come from a trusted
+/// renderer gesture (`isTrusted` — the Settings page enforces this; synthetic
+/// enigo input fails closed); revoking is one click and takes effect on the
+/// very next tool call (no cached Policy anywhere). While the env var
+/// manages the machine, writes are refused: the UI shows the toggle
+/// disabled with "managed by administrator" copy instead.
+pub async fn put_risky_input(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+    Json(b): Json<RiskyBody>,
+) -> impl IntoResponse {
+    if risky_env_managed() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "managed_by_admin",
+                    "message": "risky input is managed by the administrator (HARNESS_ALLOW_RISKY is set); the toggle is disabled",
+                }
+            })),
+        )
+            .into_response();
+    }
+    let store = match lock_chat(&s) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    if store
+        .set_pref(&uid, "allow_risky_input", if b.allowed { "1" } else { "0" })
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
+        )
+            .into_response();
+    }
+    crate::diagnostics::push(format!(
+        "prefs: risky-input {} by {}",
+        if b.allowed { "enabled" } else { "revoked" },
+        uid.chars().take(8).collect::<String>(),
+    ));
+    let (allowed, source) = risky_allowed(&store, &uid);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "allowed": allowed, "source": source })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    pub session_id: Option<String>,
+}
+
+/// Strip `?query` from any http(s) URL token in free text (T4 G5: the
+/// `open_url.query` exclusion — verbatim passthrough is forbidden).
+fn strip_queries(text: &str) -> String {
+    text.split_whitespace()
+        .map(|tok| {
+            if tok.starts_with("http://") || tok.starts_with("https://") {
+                match tok.find('?') {
+                    Some(i) => tok[..i].to_string(),
+                    None => tok.to_string(),
+                }
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Redact one persisted tool turn for export (T4 G5):
+/// - allowlist shape `{tool, ok, output}` only (screenshot bytes, if they
+///   ever landed in a result, are structurally excluded — today results
+///   carry reference + metadata only);
+/// - `type_text` output → `[redacted N chars]`;
+/// - `open_url` output → query stripped.
+fn redact_audit_tool(content: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return "[unparseable]".to_string(),
+    };
+    let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or("?");
+    let ok = v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false);
+    let output = v
+        .get("output")
+        .and_then(|o| o.as_str())
+        .unwrap_or("")
+        .to_string();
+    let output = match tool {
+        "type_text" => {
+            // Persisted previews look like "typed 200 chars": recover the
+            // count so the redaction keeps its size signal.
+            let n = output
+                .split_whitespace()
+                .filter_map(|w| w.parse::<u32>().ok())
+                .next()
+                .unwrap_or_else(|| output.chars().count() as u32);
+            format!("[redacted {n} chars]")
+        }
+        _ => strip_queries(&output),
+    };
+    serde_json::json!({ "tool": tool, "ok": ok, "output": output }).to_string()
+}
+
+/// T4 G5: per-session audit export (v1) as NDJSON download. Same token +
+/// user gate as the rest of `/v1`: a session is exportable only by its
+/// owner, and secrets are redacted (never raw).
+pub async fn audit_export(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+    Query(q): Query<AuditQuery>,
+) -> impl IntoResponse {
+    let sid = match q.session_id.filter(|v| !v.trim().is_empty()) {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "validation", "message": "session_id is required", "field": "session_id" }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let store = match lock_chat(&s) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    match store.get_session(&sid, &uid) {
+        Ok(Some(_)) => {}
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": { "code": "not_found", "message": "session not found" }
+                })),
+            )
+                .into_response();
+        }
+    }
+    let lines = match store.audit_lines(&sid, &uid) {
+        Ok(l) => l,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": { "code": "internal", "message": "internal server error" } })),
+            )
+                .into_response();
+        }
+    };
+    let mut body = String::new();
+    for (role, content, ts) in &lines {
+        // User/assistant bubbles pass through; tool turns are redacted.
+        let content = if role == "tool" {
+            redact_audit_tool(content)
+        } else {
+            strip_queries(content)
+        };
+        body.push_str(
+            &serde_json::json!({ "t": ts, "role": role, "content": content }).to_string(),
+        );
+        body.push('\n');
+    }
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/x-ndjson"),
+            (
+                "content-disposition",
+                "attachment; filename=\"audit.ndjson\"",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,6 +1603,29 @@ mod tests {
     /// with the actionable code, never with an opaque pi error mid-turn.
     /// (The fake id keeps pi_auth_has deterministic: no such entry can
     /// exist in the user's pi auth file, and nothing stored it in ours.)
+    #[test]
+    fn audit_redaction_contract() {
+        // type_text → size signal only, never content.
+        let line = redact_audit_tool(
+            &serde_json::json!({"tool": "type_text", "ok": true, "output": "typed 200 chars"}).to_string(),
+        );
+        assert!(line.contains("[redacted 200 chars]"), "{line}");
+        assert!(!line.contains("typed 200 chars\""), "{line}");
+        // open_url query stripped, shape allowlisted (no extra keys).
+        let line = redact_audit_tool(
+            &serde_json::json!({"tool": "open_url", "ok": true, "output": "launched https://example.com/a?token=secret", "bytes": "AAA"}).to_string(),
+        );
+        assert!(!line.contains("token=secret"), "{line}");
+        assert!(line.contains("https://example.com/a"), "{line}");
+        assert!(!line.contains("bytes"), "{line}");
+        // Screenshot metadata passes (size-only), queries in chat text drop.
+        assert_eq!(
+            strip_queries("see https://example.com/a?x=1 now"),
+            "see https://example.com/a now"
+        );
+        assert_eq!(redact_audit_tool("not json"), "[unparseable]");
+    }
+
     #[test]
     fn keyless_unknown_providers_fail_closed() {
         let err = match turn_provider("definitely-not-a-provider-xyz", "nobody") {

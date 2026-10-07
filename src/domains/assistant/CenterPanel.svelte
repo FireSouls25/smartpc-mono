@@ -158,8 +158,16 @@
             class="btn btn-ghost"
             style="padding: 0.375rem 0.5rem;"
             onclick={() => void voice.stopSpeaking()}
+            title={t("chat.stop")}
           >
-            {t("chat.stop").toUpperCase()}
+            {#if voice.speakChunkCount > 1}
+              {t("voice.chunkProgress", {
+                i: String(voice.speakChunkIndex),
+                n: String(voice.speakChunkCount),
+              })} ✕
+            {:else}
+              {t("chat.stop").toUpperCase()}
+            {/if}
           </button>
         {/if}
       </div>
@@ -310,7 +318,14 @@
             style="color: var(--accent);"
             onclick={() => void voice.stopSpeaking()}
           >
-            {t("voice.speaking")} ✕
+            {#if voice.speakChunkCount > 1}
+              {t("voice.chunkProgress", {
+                i: String(voice.speakChunkIndex),
+                n: String(voice.speakChunkCount),
+              })} ✕
+            {:else}
+              {t("voice.speaking")} ✕
+            {/if}
           </button>
         {/if}
       </div>

@@ -62,7 +62,16 @@ export const es = {
   "voice.sayHey": "Di «{word}» para empezar",
   "voice.speak": "Leer respuestas en voz alta",
   "voice.speaking": "Hablando…",
-  "voice.speakHint": "Usa la voz del sistema. La primera vez descarga ~21 MB.",
+  "voice.speakHint":
+    "Voz local Piper, sin red. La primera vez descarga el modelo (~60 MB).",
+  "voice.ttsVoice": "Voz de lectura",
+  "voice.ttsVoiceHint":
+    "Voz de Piper por idioma. Se guarda en este equipo; el servidor no la recuerda.",
+  "voice.testPlay": "Probar voz",
+  "voice.testing": "Reproduciendo prueba…",
+  "voice.downloadingTts": "Descargando el modelo de voz (solo la primera vez)…",
+  "voice.testPhrase": "Hola, esta es la voz de lectura de Smart PC en español.",
+  "voice.chunkProgress": "● {i}/{n}",
   "voice.busy":
     "El asistente está ocupado; tu texto quedó en el campo de entrada.",
   "voice.downloading": "Descargando el modelo de voz (solo la primera vez)…",
@@ -176,6 +185,14 @@ export const es = {
   "aikey.piAuth": "Se configura con `pi auth` en la terminal",
   "aikey.unverified":
     "Guardada sin verificar: pi la probará en el primer uso. Si falla, revisa la clave.",
+  "settings.riskyTitle": "Control del PC",
+  "settings.riskyLabel": "Permitir control del PC (teclado, ratón, capturas)",
+  "settings.riskyHint":
+    "Permite que el asistente escriba, mueva el ratón y capture la pantalla. Solo para sesiones de confianza.",
+  "settings.riskyEnv":
+    "Gestionado por el administrador (HARNESS_ALLOW_RISKY): el interruptor está desactivado.",
+  "settings.auditExport": "Descargar auditoría de la sesión",
+  "preview.prefix": "Vista previa",
 } as const;
 
 export type I18nKey = keyof typeof es;

@@ -26,6 +26,22 @@ export type VoiceEvent =
   | { seq: number; epoch: number; type: "error"; code: string; message: string }
   | { seq: number; epoch: number; type: "end" };
 
+export interface TtsModel {
+  id: string;
+  lang: string;
+  label: string;
+  size_mb: number;
+  quality: string;
+}
+
+export interface TtsModelsResponse {
+  models: TtsModel[];
+  default_for_lang: Record<string, string>;
+  active: string | null;
+  /** Per-id readiness (mirrors the STT `models_ready` shape). */
+  ready: Record<string, boolean>;
+}
+
 export const voiceApi = {
   status: () => api<VoiceStatus>("/v1/voice/status"),
 
@@ -57,13 +73,29 @@ export const voiceApi = {
       { timeoutMs: 35000 },
     ),
 
-  /** Speak text aloud (fire-and-forget server-side with a watchdog). */
-  speak: (text: string, lang: string) =>
-    api<{ ok: boolean; estimated_ms: number }>("/v1/voice/speak", {
-      method: "POST",
-      body: { text, lang },
-      timeoutMs: 30000,
-    }),
+  /**
+   * Speak text aloud (fire-and-forget server-side with a watchdog).
+   * Per-chunk call: the store splits long replies and paces chunks by
+   * each authoritative `estimated_ms`. `voice` is a catalog id from
+   * `ttsModels` (unknown → 400 `invalid_voice`); omit for the default.
+   */
+  speak: (
+    text: string,
+    lang: string,
+    voice?: string,
+    opts?: { timeoutMs?: number },
+  ) =>
+    api<{ ok: boolean; estimated_ms: number; model: string }>(
+      "/v1/voice/speak",
+      {
+        method: "POST",
+        body: voice ? { text, lang, voice } : { text, lang },
+        timeoutMs: opts?.timeoutMs ?? 30000,
+      },
+    ),
+
+  /** TTS voice catalog (always 200; empty models = engine missing). */
+  ttsModels: () => api<TtsModelsResponse>("/v1/voice/tts-models"),
 
   stopSpeaking: () =>
     api<{ ok: boolean }>("/v1/voice/speak-stop", {

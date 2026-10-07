@@ -3,6 +3,7 @@
 // loop and hands final transcripts to the chat store (they render as normal
 // user messages and run through the agent like typed text).
 import { voiceApi, type VoiceEvent, type VoiceMode } from "./voice.api";
+import { estimateSpeakMs, splitSpeak } from "./voice.chunks";
 import { ApiError } from "../../lib/api";
 import {
   chatStore as chat,
@@ -21,6 +22,7 @@ const DEVICE_KEY = "smartpc.voice.device";
 const SPEAK_KEY = "smartpc.voice.speak";
 const SENS_KEY = "smartpc.voice.sensitivity";
 const STT_MODEL_KEY = "smartpc.voice.sttModel";
+const ttsVoiceKey = (lang: string): string => `smartpc.voice.ttsVoice.${lang}`;
 const HOTKEY_KEY = "smartpc.voice.hotkey";
 export const DEFAULT_WAKE_WORD = "hey";
 /** Mic toggle shortcut. Shown on the mic button and editable in settings. */
@@ -87,6 +89,18 @@ function loadSttModel(): string {
   }
 }
 
+function loadTtsVoice(): string {
+  try {
+    // Preference, not secret (mirrors the §4 storage rationale): which
+    // catalog voice reads aloud, per UI language. Blank = server default.
+    return (window.localStorage.getItem(ttsVoiceKey(getLang())) || "")
+      .trim()
+      .slice(0, 128);
+  } catch {
+    return "";
+  }
+}
+
 function loadHotkey(): string {
   try {
     const h = (window.localStorage.getItem(HOTKEY_KEY) || "").trim();
@@ -131,7 +145,14 @@ let sensitivity = $state<VoiceSensitivity>(loadSensitivity());
 let sttModel = $state<string>(loadSttModel());
 let hotkey = $state<string>(loadHotkey());
 let speaking = $state(false);
-let speakTimer: number | null = null;
+// Chunk-queue pump (A1, frontend-owned — the server stays single-utterance).
+// `speakGen` guards the pump: a stop/cancel bumps it and stale results are
+// dropped instead of fighting the current state.
+let speakGen = 0;
+let speakChunkIndex = $state(0);
+let speakChunkCount = $state(0);
+let ttsVoice = $state<string>(loadTtsVoice());
+let ttsTesting = $state(false);
 let lastSpokenId: string | null = null;
 // Transient acknowledgment ("heard the wake word, talk now"), cleared after
 // a few seconds or on the next state change.
@@ -544,50 +565,123 @@ function ensureReplySub(): void {
 
 ensureReplySub();
 
-function clearSpeakTimer(): void {
-  if (speakTimer !== null) {
-    window.clearTimeout(speakTimer);
-    speakTimer = null;
-  }
-}
-
-/** Read text aloud (barge-in: cuts anything playing). No-op on failure. */
+/**
+ * Read text aloud through the chunk queue (barge-in: cuts anything
+ * playing). Detached `void` task — never blocks the turn. Each chunk is
+ * a fresh server child (server barge-in semantics preserved); chunks are
+ * paced by their authoritative `estimated_ms` (+2 s grace, 250 s cap).
+ * Failures: a bad chunk is skipped, a transport failure aborts the queue
+ * (conversation → `speakFailed` + `stopAll`; manual → silent diagnostic).
+ * Empty split → no POSTs.
+ */
 async function speakText(text: string): Promise<void> {
-  const clean = text.trim().slice(0, 2000);
-  if (!clean) return;
-  clearSpeakTimer();
-  lastSpokenNorm = normEcho(clean);
-  try {
-    const res = await voiceApi.speak(clean, getLang());
-    speaking = true;
-    speakTimer = window.setTimeout(
-      () => {
-        speaking = false;
-        speakTimer = null;
-        // Conversation turn-taking: speech "end" is the watchdog estimate
-        // (the server emits no completion events by design).
-        if (conversationActive) scheduleNextTurn();
-      },
-      Math.min(res.estimated_ms + 5000, 250000),
-    );
-  } catch {
-    speaking = false;
-    if (conversationActive) {
-      // Conversation needs voice: degrade honestly instead of looping mute.
-      error = t("voice.speakFailed");
-      void stopAll();
+  const chunks = splitSpeak(text);
+  if (chunks.length === 0) return;
+  const my = ++speakGen;
+  lastSpokenNorm = normEcho(text.trim().slice(0, 2000));
+  speakChunkCount = chunks.length;
+  speakChunkIndex = 0;
+  speaking = true;
+  const lang = getLang();
+  const voice = ttsVoice || undefined;
+  for (let i = 0; i < chunks.length; i++) {
+    if (my !== speakGen) return;
+    speakChunkIndex = i + 1;
+    let estimated: number;
+    try {
+      const res = await voiceApi.speak(chunks[i], lang, voice);
+      if (my !== speakGen) {
+        // Barge-in guard: our POST resolved post-stop, so the server may
+        // be playing a stale chunk — one more idempotent stop cuts it.
+        try {
+          await voiceApi.stopSpeaking();
+        } catch {
+          /* already quiet */
+        }
+        return;
+      }
+      // Authoritative per-chunk estimate; the local mirror (same
+      // formula as the server) is the fallback so the pacing never
+      // collapses to zero on a bare-bones response.
+      estimated = res.estimated_ms || estimateSpeakMs(chunks[i]);
+    } catch (err) {
+      if (my !== speakGen) return;
+      if (
+        err instanceof ApiError &&
+        (err.code === "invalid_voice" || err.code === "validation")
+      ) {
+        // Bad chunk (unknown voice, validation): skip it, keep the queue.
+        continue;
+      }
+      // Transport failure aborts the queue.
+      speakChunkIndex = 0;
+      speakChunkCount = 0;
+      speaking = false;
+      if (conversationActive) {
+        // Conversation needs voice: degrade honestly, never loop mute.
+        error = t("voice.speakFailed");
+        void stopAll();
+      } else {
+        console.debug("[voice] speak chunk failed:", err);
+      }
+      return;
     }
+    if (my !== speakGen) return;
+    // Pace by the authoritative estimate: the server gives no completion
+    // events, so the next chunk posts once this one should be done.
+    await sleep(Math.min(estimated + 2000, 250000));
   }
+  if (my !== speakGen) return;
+  speakChunkIndex = 0;
+  speakChunkCount = 0;
+  speaking = false;
+  // Conversation turn-taking: queue drain is the speech "end".
+  if (conversationActive) scheduleNextTurn();
 }
 
 async function stopSpeaking(): Promise<void> {
-  clearSpeakTimer();
+  speakGen++;
+  speakChunkIndex = 0;
+  speakChunkCount = 0;
   speaking = false;
   try {
     await voiceApi.stopSpeaking();
   } catch {
     /* already quiet */
   }
+}
+
+/**
+ * Test-play the picked voice: canned ~60-char phrase, indeterminate
+ * `downloading` progress, 180 s budget (first use downloads the model).
+ */
+async function testTtsVoice(): Promise<void> {
+  if (ttsTesting) return;
+  ttsTesting = true;
+  try {
+    await voiceApi.speak(
+      t("voice.testPhrase"),
+      getLang(),
+      ttsVoice || undefined,
+      {
+        timeoutMs: 180000,
+      },
+    );
+  } catch (err) {
+    console.debug("[voice] test-play failed:", err);
+  } finally {
+    ttsTesting = false;
+  }
+}
+
+function setTtsVoice(id: string): void {
+  ttsVoice = id.trim().slice(0, 128);
+  persist(ttsVoiceKey(getLang()), ttsVoice);
+}
+
+/** Re-read the pref (Settings calls this on entry — the key is per-lang). */
+function reloadTtsVoice(): void {
+  ttsVoice = loadTtsVoice();
 }
 
 export const voice = {
@@ -618,6 +712,18 @@ export const voice = {
   get speaking(): boolean {
     return speaking;
   },
+  get speakChunkIndex(): number {
+    return speakChunkIndex;
+  },
+  get speakChunkCount(): number {
+    return speakChunkCount;
+  },
+  get ttsVoice(): string {
+    return ttsVoice;
+  },
+  get ttsTesting(): boolean {
+    return ttsTesting;
+  },
   get error(): string {
     return error;
   },
@@ -645,4 +751,7 @@ export const voice = {
   setSpeakEnabled,
   speakText,
   stopSpeaking,
+  testTtsVoice,
+  setTtsVoice,
+  reloadTtsVoice,
 };

@@ -23,11 +23,14 @@
   } from "../voice/voice.store.svelte";
   import {
     voiceApi,
+    type TtsModelsResponse,
     type VoiceMode,
     type VoiceStatus,
   } from "../voice/voice.api";
   import SelectMenu from "../../shared/SelectMenu.svelte";
   import { timeOf } from "../../lib/format";
+  import { api } from "../../lib/api";
+  import { sessionStore } from "../assistant/sessions.store.svelte";
   let {
     onBack,
     initialSection = 0,
@@ -64,8 +67,12 @@
   // Cloud status changes from the outside (other devices sync), so it is
   // read fresh on every Account visit.
   $effect(() => {
+    if (section === 0) {
+      void loadRisky();
+    }
     if (section === 2) {
       void loadVoiceStatus();
+      void loadTtsModels();
     }
     if (section === 3) {
       void cloud.load();
@@ -175,6 +182,134 @@
     }));
   }
 
+  // T4 D5 risky toggle (renderer mirror, non-authoritative: the sidecar
+  // re-resolves env-OR-toggle on every tool call). Enabling requires a
+  // trusted gesture (isTrusted — synthetic input fails closed); revoking
+  // is one click and lands immediately server-side.
+  let riskyAllowed = $state(false);
+  let riskySource = $state<"toggle" | "env" | "none">("none");
+  let riskyError = $state("");
+
+  const riskyManaged = (): boolean => riskySource === "env";
+
+  async function loadRisky(): Promise<void> {
+    riskyError = "";
+    try {
+      const res = await api<{
+        allowed: boolean;
+        source: "toggle" | "env" | "none";
+      }>("/v1/prefs/risky-input", { token: auth.token ?? undefined });
+      riskyAllowed = res.allowed;
+      riskySource = res.source;
+    } catch {
+      // Prefs unavailable (older sidecar): leave the switch off.
+    }
+  }
+
+  async function flipRisky(e: MouseEvent, next: boolean): Promise<void> {
+    // Trusted gesture gate (safety P0-e): enabling from a synthetic event
+    // (e.g. enigo-driven input) fails closed. Revoking is always honored.
+    if (next && !e.isTrusted) return;
+    if (riskyManaged()) return;
+    riskyError = "";
+    try {
+      const res = await api<{
+        allowed: boolean;
+        source: "toggle" | "env" | "none";
+      }>("/v1/prefs/risky-input", {
+        method: "PUT",
+        body: { allowed: next },
+        token: auth.token ?? undefined,
+      });
+      riskyAllowed = res.allowed;
+      riskySource = res.source;
+    } catch (err) {
+      riskyError = err instanceof Error ? err.message : "Error";
+    }
+  }
+
+  let auditError = $state("");
+
+  async function downloadAudit(): Promise<void> {
+    auditError = "";
+    const sid = sessionStore.activeSessionId;
+    if (!sid) return;
+    try {
+      const gate = window.smartpc?.sidecar;
+      const base =
+        gate?.url ?? import.meta.env.VITE_API_URL ?? "http://127.0.0.1:18080";
+      const res = await fetch(
+        `${base}/v1/support/audit-export?session_id=${encodeURIComponent(sid)}`,
+        {
+          headers: {
+            ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+            ...(gate?.token ? { "X-Sidecar-Token": gate.token } : {}),
+          },
+        },
+      );
+      if (!res.ok) throw new Error(`Error ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "audit.ndjson";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      auditError = err instanceof Error ? err.message : "Error";
+    }
+  }
+
+  // T3 voice catalog (read-only; the sidecar stays stateless per call —
+  // the pick lives in the store's per-lang localStorage pref).
+  let ttsModels = $state<TtsModelsResponse | null>(null);
+  let ttsError = $state("");
+
+  async function loadTtsModels(): Promise<void> {
+    ttsError = "";
+    voice.reloadTtsVoice();
+    try {
+      ttsModels = await voiceApi.ttsModels();
+    } catch (err) {
+      ttsModels = null;
+      ttsError = err instanceof Error ? err.message : "Error";
+    }
+  }
+
+  /** Current-lang-first dropdown (T3 Q3); server default stays first. */
+  function ttsOptions(): { value: string; label: string; hint?: string }[] {
+    const lang = getLang();
+    const models = [...(ttsModels?.models ?? [])].sort((a, b) =>
+      a.lang === lang ? (b.lang === lang ? 0 : -1) : b.lang === lang ? 1 : 0,
+    );
+    return [
+      { value: "", label: t("voice.serverDefault") },
+      ...models.map((m) => ({
+        value: m.id,
+        label: `${m.label} · ~${m.size_mb} MB`,
+        hint:
+          ttsModels?.ready?.[m.id] === false
+            ? t("voice.notDownloaded")
+            : undefined,
+      })),
+    ];
+  }
+
+  /** What will actually speak: the pick, or the server default. */
+  function effectiveTts(): { name: string; ready: boolean | null } {
+    if (voice.ttsVoice) {
+      return {
+        name: voice.ttsVoice,
+        ready: ttsModels?.ready?.[voice.ttsVoice] ?? null,
+      };
+    }
+    const fallback =
+      ttsModels?.default_for_lang?.[getLang()] ??
+      ttsModels?.default_for_lang?.["en"] ??
+      "…";
+    return { name: fallback, ready: ttsModels?.ready?.[fallback] ?? null };
+  }
+
   let modelsError = $state("");
 
   async function deleteSttModel(name: string, sizeMb: number): Promise<void> {
@@ -249,6 +384,45 @@
                       : t("common.dark")}
                 </button>
               {/each}
+            </div>
+          </div>
+          <div class="group-card">
+            <h3 class="group-title">{t("settings.riskyTitle")}</h3>
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <p class="text-sm font-bold">{t("settings.riskyLabel")}</p>
+                <p class="muted mt-0.5 text-xs">{t("settings.riskyHint")}</p>
+                {#if riskyManaged()}
+                  <p class="mt-0.5 text-xs" style="color: var(--warn);">
+                    {t("settings.riskyEnv")}
+                  </p>
+                {/if}
+                {#if riskyError}
+                  <p class="error-box mt-1">{riskyError}</p>
+                {/if}
+              </div>
+              <button
+                class="switch"
+                role="switch"
+                aria-checked={riskyAllowed}
+                aria-label={t("settings.riskyLabel")}
+                aria-disabled={riskyManaged()}
+                disabled={riskyManaged()}
+                onclick={(e) => void flipRisky(e, !riskyAllowed)}
+              ></button>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                class="btn btn-ghost"
+                style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                disabled={!sessionStore.activeSessionId}
+                onclick={() => void downloadAudit()}
+              >
+                {t("settings.auditExport")}
+              </button>
+              {#if auditError}
+                <span class="error-box">{auditError}</span>
+              {/if}
             </div>
           </div>
           <div class="group-card">
@@ -547,6 +721,44 @@
                 onclick={() => voice.setSpeakEnabled(!voice.speakEnabled)}
               ></button>
             </div>
+          </div>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.ttsVoice")}</h3>
+            <SelectMenu
+              label={t("voice.ttsVoice")}
+              value={voice.ttsVoice}
+              options={ttsOptions()}
+              align="down"
+              onChange={(v) => voice.setTtsVoice(v)}
+            />
+            <p class="faint mt-1 text-xs">{t("voice.ttsVoiceHint")}</p>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <span class="chip">
+                <span
+                  class="dot"
+                  style="background: {effectiveTts().ready === false
+                    ? 'var(--warn)'
+                    : effectiveTts().ready
+                      ? 'var(--success)'
+                      : 'var(--border-strong)'};"
+                ></span>
+                {effectiveTts().name}
+              </span>
+              <button
+                class="btn btn-ghost"
+                style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                disabled={voice.ttsTesting}
+                onclick={() => void voice.testTtsVoice()}
+              >
+                {voice.ttsTesting ? t("voice.testing") : t("voice.testPlay")}
+              </button>
+            </div>
+            {#if voice.ttsTesting}
+              <p class="faint mt-1 text-xs">{t("voice.downloadingTts")}</p>
+            {/if}
+            {#if ttsError}
+              <p class="error-box mt-2">{ttsError}</p>
+            {/if}
           </div>
         </div>
       {:else}

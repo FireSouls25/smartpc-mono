@@ -8,6 +8,9 @@
 //! - `POST /internal/pi/tool`: execute one tool call with the ambient turn
 //!   context. Failures return as results (`{ok:false}`), never throws, so
 //!   the model sees them exactly like the native harness.
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -17,6 +20,34 @@ use serde::Deserialize;
 
 use crate::ai::provider::Provider;
 use crate::api::AppState;
+use crate::harness::budget::TurnBudget;
+
+/// Per-turn + per-session budgets (T4 G4), keyed by pi session file (stable
+/// across sidecar restarts — files live under --session-dir). `turn.rs`
+/// resets the turn half when a turn starts; tool calls charge against it.
+///
+/// The guard is never held across an await (std guards are !Send): tool
+/// calls take their budget out, execute, then merge it back (`absorb`,
+/// max-wins so concurrent siblings can't drop charges).
+static BUDGETS: std::sync::OnceLock<Mutex<HashMap<String, TurnBudget>>> =
+    std::sync::OnceLock::new();
+
+fn budgets() -> &'static Mutex<HashMap<String, TurnBudget>> {
+    BUDGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Reset the per-turn counters for a new turn, keeping session caps.
+/// `dry_run` comes from `POST /v1/ai/run {preview:true}`.
+pub fn reset_turn_budget(pi_session: &str, dry_run: bool, lang: &str) {
+    if let Ok(mut map) = budgets().lock() {
+        match map.get_mut(pi_session) {
+            Some(b) => b.new_turn(dry_run, lang),
+            None => {
+                map.insert(pi_session.to_string(), TurnBudget::new(dry_run, lang));
+            }
+        }
+    }
+}
 
 pub async fn tools(State(_s): State<AppState>) -> impl IntoResponse {
     let tools: Vec<serde_json::Value> = crate::harness::tools::catalog()
@@ -109,8 +140,45 @@ pub async fn tool(
         b.name,
         ctx.chat_session_id.chars().take(8).collect::<String>(),
     ));
-    let policy = crate::harness::exec::Policy::from_env();
+    // Policy is env-OR-toggle (T4 D5), resolved per tool call so revoking
+    // the toggle takes effect immediately (no cached Policy anywhere).
+    let toggle_on = s
+        .chat
+        .lock()
+        .ok()
+        .and_then(|store| store.get_pref(&ctx.user_id, "allow_risky_input").ok())
+        .is_some_and(|v| v.as_deref() == Some("1"));
+    let policy = crate::harness::exec::Policy::for_user(toggle_on);
     let args = b.args.unwrap_or(serde_json::Value::Null);
-    let outcome = crate::harness::exec::execute(&b.name, &args, &policy).await;
-    Json(serde_json::json!({ "ok": outcome.ok, "output": outcome.output })).into_response()
+    let key = b.pi_session.clone().unwrap_or_default();
+    // Take the budget out under a short lock (never held across await),
+    // execute, then merge back. A missing entry (stale mapping, pre-T4
+    // client) starts fresh: caps enforced, grounding per call.
+    let mut budget: TurnBudget = budgets()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&key))
+        .unwrap_or_else(|| TurnBudget::new(false, "es"));
+    let outcome = crate::harness::exec::execute(&b.name, &args, &policy, &mut budget).await;
+    let abort = budget.take_abort();
+    if let Ok(mut map) = budgets().lock() {
+        match map.get_mut(&key) {
+            Some(sibling) => sibling.absorb(budget),
+            None => {
+                map.insert(key.clone(), budget);
+            }
+        }
+    }
+    // Session-cap or 3-denial abort (T4 §4): unwind the turn via cancel so
+    // the run ends in settle — never auto-advancing, never a bare string.
+    if abort {
+        crate::diagnostics::push(format!(
+            "budget: turn aborted for {} (chat {})",
+            ctx.user_id.chars().take(8).collect::<String>(),
+            ctx.chat_session_id.chars().take(8).collect::<String>(),
+        ));
+        s.pi.request_cancel(&ctx.user_id).await;
+    }
+    Json(serde_json::json!({ "ok": outcome.ok, "output": outcome.output, "preview": outcome.preview }))
+        .into_response()
 }

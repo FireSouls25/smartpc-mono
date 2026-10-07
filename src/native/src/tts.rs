@@ -24,12 +24,18 @@ pub const MAX_CHARS: usize = 2000;
 pub enum TtsError {
     Misconfigured(String),
     Failed(String),
+    /// Unknown `voice` id on the speak call (400 `invalid_voice`).
+    InvalidVoice(String),
+    /// Lost a barge-in race between spawn and store (see `speak`).
+    /// Not a failure: nothing is playing.
+    Superseded,
 }
 
 impl TtsError {
     pub fn message(&self) -> &str {
         match self {
-            Self::Misconfigured(m) | Self::Failed(m) => m,
+            Self::Misconfigured(m) | Self::Failed(m) | Self::InvalidVoice(m) => m,
+            Self::Superseded => "superseded",
         }
     }
 }
@@ -43,6 +49,15 @@ impl From<String> for TtsError {
 impl From<&str> for TtsError {
     fn from(m: &str) -> Self {
         Self::Failed(m.to_string())
+    }
+}
+
+impl TtsError {
+    /// True when the utterance lost a barge-in race (a newer speak/stop
+    /// won between spawn and store). Callers treat it as "not playing",
+    /// never as a failure.
+    pub fn is_superseded(&self) -> bool {
+        matches!(self, Self::Superseded)
     }
 }
 
@@ -77,10 +92,22 @@ impl TtsManager {
         (chars * 1000 / 14 + 20_000).clamp(25_000, 240_000)
     }
 
-    /// Speak `text` aloud. Returns the watchdog estimate in ms. Any active
-    /// speech is cut first (barge-in). Fire-and-forget: completion is NOT
-    /// observable (see module docs), the watchdog reaps the child.
-    pub async fn speak(&self, text: &str, lang: &str) -> Result<u64, TtsError> {
+    /// Speak `text` aloud. Returns the watchdog estimate in ms plus the
+    /// resolved model id. Any active speech is cut first (barge-in).
+    /// Fire-and-forget: completion is NOT observable (see module docs),
+    /// the watchdog reaps the child.
+    ///
+    /// `voice`, when given, must be a catalog id (else `InvalidVoice`).
+    /// The generation re-check between spawn and store closes the
+    /// barge-in race: a stop/speak that landed mid-spawn wins, our child
+    /// is reaped immediately, and the caller gets `Superseded`.
+    pub async fn speak(
+        &self,
+        text: &str,
+        lang: &str,
+        voice: Option<&str>,
+    ) -> Result<(u64, &'static str), TtsError> {
+        let model = resolve_tts_model(lang, voice).map_err(TtsError::InvalidVoice)?;
         let clean: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if clean.is_empty() {
             return Err(TtsError::Failed("nothing to speak".to_string()));
@@ -98,7 +125,6 @@ impl TtsManager {
             inner.generation += 1;
             inner.generation
         };
-        let model = tts_model_for_lang(lang);
         crate::diagnostics::push(format!(
             "tts: speaking {} chars (lang={lang}, model={model})",
             clean.chars().count()
@@ -184,6 +210,21 @@ impl TtsManager {
         let estimated = Self::estimate_ms(&clean);
         {
             let mut inner = self.inner.lock().map_err(|_| "tts state poisoned".to_string())?;
+            // Barge-in race: a stop/speak that won between our spawn and
+            // this store takes precedence. Scope the guard so it is dead
+            // before any await (std MutexGuard is !Send).
+            // Generation re-check: a stop/speak that landed between our
+            // spawn and this store wins. `inner` (std MutexGuard, !Send)
+            // is still needed below, so it must not be live across any
+            // await here — the reaping moves to a detached task.
+            if inner.generation != generation {
+                drop(inner);
+                let _ = child.start_kill();
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+                return Err(TtsError::Superseded);
+            }
             inner.child = Some(child);
         }
         // Watchdog: reap exactly our generation (a newer speak/stop wins).
@@ -207,7 +248,13 @@ impl TtsManager {
                 crate::diagnostics::push("tts: player reaped by watchdog".to_string());
             }
         });
-        Ok(estimated)
+        Ok((estimated, model))
+    }
+
+    /// False when the pi-listen voice extension is missing (TTS catalog
+    /// reads empty; speaks fail loudly as misconfigured).
+    pub fn engine_present(&self) -> bool {
+        self.voice_ext.is_file()
     }
 
     /// Cut active speech immediately. Idempotent.
@@ -271,8 +318,44 @@ pub fn resolve_voice_ext() -> std::path::PathBuf {
         .join("voice.ts")
 }
 
+/// TTS voice catalog (A1 read-only: no DELETE endpoint). Piper MIT
+/// voices where available (~60 MB first download); kitten-nano default
+/// for English. Sizes are approximate (Settings display only).
+#[derive(Debug, Clone, Copy)]
+pub struct TtsVoice {
+    pub id: &'static str,
+    pub lang: &'static str,
+    pub label: &'static str,
+    pub size_mb: u64,
+    pub quality: &'static str,
+}
+
+pub const TTS_CATALOG: &[TtsVoice] = &[
+    TtsVoice { id: "piper-es_ES-davefx-medium-int8", lang: "es", label: "Español (Davefx)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "piper-fr_FR-siwis-medium-int8", lang: "fr", label: "Français (Siwis)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "piper-de_DE-thorsten-medium-int8", lang: "de", label: "Deutsch (Thorsten)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "piper-it_IT-paola-medium-int8", lang: "it", label: "Italiano (Paola)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "piper-pt_BR-cadu-medium-int8", lang: "pt", label: "Português (Cadu)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "piper-hi_IN-pratham-medium-int8", lang: "hi", label: "हिन्दी (Pratham)", size_mb: 63, quality: "medium" },
+    TtsVoice { id: "kitten-nano-en-v0_2", lang: "en", label: "English (Kitten nano)", size_mb: 40, quality: "nano" },
+];
+
+/// Resolve the model for a speak call: an explicit `voice` must be a
+/// catalog id (unknown → Err for the 400 `invalid_voice`); omitted/blank
+/// falls back to the per-language default below.
+pub fn resolve_tts_model(lang: &str, voice: Option<&str>) -> Result<&'static str, String> {
+    match voice.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(id) => TTS_CATALOG
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.id)
+            .ok_or_else(|| format!("unknown tts voice: {id}")),
+        None => Ok(tts_model_for_lang(lang)),
+    }
+}
+
 /// Voice model per UI language (pi-listen catalog ids). Piper MIT voices
-/// where available (~21 MB); kitten default otherwise.
+/// where available; kitten default otherwise.
 /// NOTE: pi-listen wants the full `piper-…` ids — the bare Piper names
 /// (`es_ES-davefx…`) are rejected as unknown and the utterance dies
 /// silently (fire-and-forget design), which is exactly how Spanish TTS
@@ -322,6 +405,50 @@ mod tests {
         assert_eq!(long, 240_000);
         // ~14 chars/sec: 1400 chars ≈ 100s + 20s overhead.
         assert_eq!(TtsManager::estimate_ms(&"x".repeat(1400)), 120_000);
+    }
+
+    #[test]
+    fn catalog_ids_are_piper_prefixed() {
+        // A2 takes these ids over as synth ids: the prefix is the contract.
+        assert!(!TTS_CATALOG.is_empty());
+        for v in TTS_CATALOG {
+            assert!(
+                v.id.starts_with("piper-") || v.id.starts_with("kitten-"),
+                "bad catalog id: {}",
+                v.id
+            );
+            assert!(v.size_mb > 0);
+            assert!(!v.label.is_empty());
+        }
+    }
+
+    #[test]
+    fn resolve_voice_param() {
+        // Explicit id wins over the language default.
+        assert_eq!(
+            resolve_tts_model("es", Some("kitten-nano-en-v0_2")),
+            Ok("kitten-nano-en-v0_2")
+        );
+        // Blank behaves as omitted (sidecar stays stateless per-call).
+        assert_eq!(
+            resolve_tts_model("es", Some("  ")),
+            Ok("piper-es_ES-davefx-medium-int8")
+        );
+        assert_eq!(
+            resolve_tts_model("es", None),
+            Ok("piper-es_ES-davefx-medium-int8")
+        );
+        // Unknown → Err (the route maps this to 400 invalid_voice).
+        assert!(resolve_tts_model("es", Some("nope")).is_err());
+    }
+
+    #[test]
+    fn engine_absent_without_voice_ext() {
+        let mgr = TtsManager::new(
+            std::env::temp_dir(),
+            PathBuf::from("/nonexistent-voice-ext-xyz/voice.ts"),
+        );
+        assert!(!mgr.engine_present());
     }
 
     #[test]

@@ -87,6 +87,9 @@ pub async fn events(
 pub struct SpeakBody {
     pub text: Option<String>,
     pub lang: Option<String>,
+    /// Optional catalog voice id (`GET /v1/voice/tts-models`). Unknown →
+    /// 400 `invalid_voice`. Omitted/blank → per-language default.
+    pub voice: Option<String>,
 }
 
 /// Speak text aloud through the pi-listen engine (fire-and-forget: returns
@@ -120,19 +123,47 @@ pub async fn speak(
         .as_deref()
         .filter(|l| !l.trim().is_empty())
         .unwrap_or("es");
-    match s.tts.speak(&text, lang).await {
-        Ok(estimated_ms) => (
+    // Resolve first so an unknown voice fails closed before any spawn.
+    let model = match crate::tts::resolve_tts_model(lang, b.voice.as_deref()) {
+        Ok(m) => m,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "invalid_voice", "message": msg, "field": "voice" }
+                })),
+            )
+                .into_response();
+        }
+    };
+    match s.tts.speak(&text, lang, b.voice.as_deref()).await {
+        Ok((estimated_ms, model)) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "estimated_ms": estimated_ms })),
+            Json(serde_json::json!({ "ok": true, "estimated_ms": estimated_ms, "model": model })),
         )
             .into_response(),
         Err(e) => {
+            if e.is_superseded() {
+                // Barge-in won mid-spawn: nothing plays, so answer ok
+                // (the client drops the stale chunk by generation anyway).
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "ok": true, "estimated_ms": 0, "model": model })),
+                )
+                    .into_response();
+            }
             let (status, code) = match &e {
                 crate::tts::TtsError::Misconfigured(_) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, "misconfigured")
                 }
+                crate::tts::TtsError::InvalidVoice(_) => {
+                    (StatusCode::BAD_REQUEST, "invalid_voice")
+                }
                 crate::tts::TtsError::Failed(_) => {
                     (StatusCode::BAD_GATEWAY, "tts_failed")
+                }
+                crate::tts::TtsError::Superseded => {
+                    (StatusCode::OK, "superseded")
                 }
             };
             (
@@ -142,6 +173,46 @@ pub async fn speak(
                 .into_response()
         }
     }
+}
+
+/// TTS voice catalog (A1 read-only; no DELETE — uninstalling a voice is
+/// out of scope). Always 200: empty `models` means the pi-listen voice
+/// extension is missing. `active` is always null — the sidecar stays
+/// stateless per call (the renderer keeps its `ttsVoice` pref).
+/// `ready` mirrors the STT `models_ready` shape (per-id download state;
+/// true while the engine is present — pi-listen owns the voice files).
+pub async fn tts_models(State(s): State<AppState>) -> impl IntoResponse {
+    let present = s.tts.engine_present();
+    let models: Vec<serde_json::Value> = if present {
+        crate::tts::TTS_CATALOG
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "id": v.id,
+                    "lang": v.lang,
+                    "label": v.label,
+                    "size_mb": v.size_mb,
+                    "quality": v.quality,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let ready: std::collections::BTreeMap<&str, bool> = crate::tts::TTS_CATALOG
+        .iter()
+        .map(|v| (v.id, present))
+        .collect();
+    let defaults: std::collections::BTreeMap<&str, &str> = ["es", "en", "fr", "de", "it", "pt", "hi"]
+        .into_iter()
+        .map(|l| (l, crate::tts::tts_model_for_lang(l)))
+        .collect();
+    Json(serde_json::json!({
+        "models": models,
+        "default_for_lang": defaults,
+        "active": serde_json::Value::Null,
+        "ready": ready,
+    }))
 }
 
 /// Cut active speech immediately. Always ok (idempotent).

@@ -41,3 +41,13 @@ CREATE TABLE IF NOT EXISTS ai_selection (
   model       TEXT,
   updated_at  TEXT NOT NULL
 );
+
+-- T4 D5: renderer-visible preferences (not secrets — consistent with
+-- ai_selection living here too). `allow_risky_input` = "1"/"0".
+CREATE TABLE IF NOT EXISTS prefs (
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key         TEXT NOT NULL,
+  value       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (user_id, key)
+);

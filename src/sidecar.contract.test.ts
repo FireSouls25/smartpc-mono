@@ -13,6 +13,17 @@ const TOKEN = "contract-token-min-16-chars!!";
 const BASE = `http://127.0.0.1:${PORT}`;
 const gate = { "X-Sidecar-Token": TOKEN, "Content-Type": "application/json" };
 
+// Tool-schema surfacing in /internal/pi/tools responses. Known constraint
+// keywords are typed so assertions compile; anything else rides `unknown`.
+interface SchemaProp {
+  enum?: unknown;
+  minimum?: unknown;
+  maximum?: unknown;
+  maxLength?: unknown;
+  default?: unknown;
+  [k: string]: unknown;
+}
+
 let child: ChildProcess | null = null;
 
 async function waitForHealth(deadlineMs = 300000): Promise<void> {
@@ -485,5 +496,352 @@ describe("sidecar contract", () => {
     };
     expect(goneAgainBody.ok).toBe(true);
     expect(goneAgainBody.removed).toBe(false);
+  });
+
+  test("T4 control: protocol is 4 (single bump for the union)", async () => {
+    expect(SIDECAR_PROTOCOL).toBe(4);
+    const res = await fetch(`${BASE}/health`);
+    const body = (await res.json()) as { protocol: number };
+    expect(body.protocol).toBe(4);
+  });
+
+  test("T4 control: catalog carries mouse/key tools + honest type_text", async () => {
+    const res = await fetch(`${BASE}/internal/pi/tools`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      tools: {
+        name: string;
+        description: string;
+        parameters: {
+          type: string;
+          properties: Record<string, SchemaProp>;
+          required: string[];
+          additionalProperties: boolean;
+        };
+      }[];
+    };
+    // Contains-key per tool (never totals).
+    const byName = new Map(body.tools.map((t) => [t.name, t]));
+    const move = byName.get("mouse_move");
+    expect(move).toBeDefined();
+    expect(move!.parameters.required).toEqual(["x", "y"]);
+    expect(move!.description).toContain("screenshot");
+    const click = byName.get("mouse_click");
+    expect(click).toBeDefined();
+    expect(click!.parameters.properties["button"]?.enum).toEqual([
+      "left",
+      "right",
+      "middle",
+    ]);
+    expect(click!.parameters.properties["count"]?.maximum).toBe(2);
+    const scroll = byName.get("mouse_scroll");
+    expect(scroll).toBeDefined();
+    expect(scroll!.parameters.properties["delta"]?.minimum).toBe(-10);
+    expect(scroll!.parameters.properties["delta"]?.maximum).toBe(10);
+    const combo = byName.get("key_combo");
+    expect(combo).toBeDefined();
+    expect(combo!.parameters.required).toEqual(["combo"]);
+    expect(combo!.parameters.properties["combo"]?.enum).toContain("redo");
+    // type_text is honestly budgeted: 200/call, no NEVER claim.
+    const tt = byName.get("type_text");
+    expect(tt!.parameters.properties["text"]?.maxLength).toBe(200);
+    expect(tt!.description).not.toContain("NEVER");
+    // get_system_context advertises its refresh passthrough (T1 P2 fix).
+    expect(
+      byName.get("get_system_context")!.parameters.properties,
+    ).toHaveProperty("refresh");
+  });
+
+  test("T4 control: risky toggle round-trips per user", async () => {
+    const tag = `r${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    // Fresh user: off, source none (CI never sets HARNESS_ALLOW_RISKY).
+    const before = (await (
+      await fetch(`${BASE}/v1/prefs/risky-input`, { headers: authed })
+    ).json()) as { allowed: boolean; source: string };
+    expect(before.allowed).toBe(false);
+    expect(before.source).toBe("none");
+    // Enable: one click, source toggle.
+    const on = await fetch(`${BASE}/v1/prefs/risky-input`, {
+      method: "PUT",
+      headers: authed,
+      body: JSON.stringify({ allowed: true }),
+    });
+    expect(on.ok).toBe(true);
+    const onBody = (await on.json()) as { allowed: boolean; source: string };
+    expect(onBody.allowed).toBe(true);
+    expect(onBody.source).toBe("toggle");
+    // Revoke: one click back off.
+    const off = await fetch(`${BASE}/v1/prefs/risky-input`, {
+      method: "PUT",
+      headers: authed,
+      body: JSON.stringify({ allowed: false }),
+    });
+    expect(off.ok).toBe(true);
+    expect(((await off.json()) as { allowed: boolean }).allowed).toBe(false);
+    // Another user's toggle is untouched (per-user scoping).
+    const again = (await (
+      await fetch(`${BASE}/v1/prefs/risky-input`, { headers: authed })
+    ).json()) as { allowed: boolean };
+    expect(again.allowed).toBe(false);
+  });
+
+  test("T4 control: audit export is gated, redacted NDJSON", async () => {
+    const tag = `a${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    // No token at all: same gate as the rest of /v1.
+    expect(
+      (await fetch(`${BASE}/v1/support/audit-export?session_id=x`)).status,
+    ).toBe(401);
+    // session_id required.
+    const missing = await fetch(`${BASE}/v1/support/audit-export`, {
+      headers: authed,
+    });
+    expect(missing.status).toBe(400);
+    // Unknown session: 404, never another user's rows.
+    const gone = await fetch(
+      `${BASE}/v1/support/audit-export?session_id=nope`,
+      { headers: authed },
+    );
+    expect(gone.status).toBe(404);
+    // Fresh session: 200, NDJSON content type, zero rows.
+    const sess = (await (
+      await fetch(`${BASE}/v1/chat/sessions`, {
+        method: "POST",
+        headers: authed,
+        body: JSON.stringify({ title: "audit probe" }),
+      })
+    ).json()) as { session: { id: string } };
+    const exp = await fetch(
+      `${BASE}/v1/support/audit-export?session_id=${sess.session.id}`,
+      { headers: authed },
+    );
+    expect(exp.ok).toBe(true);
+    expect(exp.headers.get("content-type")).toContain("ndjson");
+    expect(exp.headers.get("content-disposition") ?? "").toContain(
+      "attachment",
+    );
+    expect(await exp.text()).toBe("");
+  });
+
+  test("T2 open_url: catalog carries the link opener (Medium, gated)", async () => {
+    const res = await fetch(`${BASE}/internal/pi/tools`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      tools: {
+        name: string;
+        description: string;
+        parameters: {
+          type: string;
+          properties: Record<string, SchemaProp>;
+          required: string[];
+          additionalProperties: boolean;
+        };
+      }[];
+    };
+    // Contains-key per tool (never totals — later tracks add more).
+    const byName = new Map(body.tools.map((t) => [t.name, t]));
+    const link = byName.get("open_url");
+    expect(link).toBeDefined();
+    expect(link!.parameters.additionalProperties).toBe(false);
+    expect(link!.parameters.required).toEqual(["url"]);
+    expect(link!.parameters.properties["url"]?.maxLength).toBe(2048);
+    expect(link!.parameters.properties).toHaveProperty("browser");
+    // Safety P0-a copy: allowlist + http-confirm + query-strip documented.
+    expect(link!.description).toContain("allowlisted");
+    expect(link!.description).toContain("confirmation");
+    expect(link!.description).toContain("query");
+  });
+
+  test("T2 open_url: javascript: URLs fail closed (never launched)", async () => {
+    // No turn context here, so the tool endpoint must fail closed as a
+    // result ({ok:false}), never throw or launch. The strict scheme
+    // refusal itself (ok:false containing "refused javascript:") is
+    // asserted in Rust (exec::tests::open_url_refuses_javascript_by_scheme).
+    for (const url of [
+      "javascript:alert(1)",
+      "javascript:alert(document.cookie)",
+    ]) {
+      const res = await fetch(`${BASE}/internal/pi/tool`, {
+        method: "POST",
+        headers: gate,
+        body: JSON.stringify({ name: "open_url", args: { url } }),
+      });
+      const body = (await res.json()) as { ok: boolean };
+      expect(body.ok).toBe(false);
+    }
+  });
+
+  test("T1 grounding: tool catalog carries the display tools", async () => {
+    const res = await fetch(`${BASE}/internal/pi/tools`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      tools: {
+        name: string;
+        description: string;
+        parameters: {
+          type: string;
+          properties: Record<string, SchemaProp>;
+          required: string[];
+          additionalProperties: boolean;
+        };
+      }[];
+    };
+    // Contains-key per tool (never totals — later tracks add more).
+    const byName = new Map(body.tools.map((t) => [t.name, t]));
+    const info = byName.get("get_display_info");
+    expect(info).toBeDefined();
+    expect(info!.parameters.additionalProperties).toBe(false);
+    expect(info!.parameters.properties).toHaveProperty("refresh");
+    const shot = byName.get("capture_screen");
+    expect(shot).toBeDefined();
+    // Disclosure copy (safety P0-b): the model sees what capture implies.
+    expect(shot!.description).toContain("may include secrets");
+    expect(shot!.parameters.additionalProperties).toBe(false);
+    const props = shot!.parameters.properties;
+    expect(props["max_width"]?.maximum).toBe(1280);
+    expect(props["format"]?.enum).toContain("png");
+    expect(props).toHaveProperty("region");
+  });
+
+  test("T3 voice: tts-models catalog is always 200 with stable shapes", async () => {
+    const res = await fetch(`${BASE}/v1/voice/tts-models`, { headers: gate });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      models: {
+        id: string;
+        lang: string;
+        label: string;
+        size_mb: number;
+        quality: string;
+      }[];
+      default_for_lang: Record<string, string>;
+      active: string | null;
+      ready: Record<string, boolean>;
+    };
+    expect(Array.isArray(body.models)).toBe(true);
+    // Empty models = engine missing (pi-bridge not installed here); either
+    // way the shape holds and defaults stay advertised.
+    for (const m of body.models) {
+      // A2 takes these ids over as synth ids: the prefix is the contract.
+      expect(m.id.startsWith("piper-") || m.id.startsWith("kitten-")).toBe(
+        true,
+      );
+      expect(typeof m.lang).toBe("string");
+      expect(typeof m.label).toBe("string");
+      expect(typeof m.size_mb).toBe("number");
+      expect(typeof m.quality).toBe("string");
+    }
+    expect(typeof body.default_for_lang).toBe("object");
+    expect(body.default_for_lang["es"]).toContain("piper-");
+    expect(body.default_for_lang["en"]).toBeDefined();
+    // Sidecar stays stateless per call: no active voice server-side.
+    expect(body.active).toBeNull();
+    expect(typeof body.ready).toBe("object");
+  });
+
+  test("T3 voice: speak rejects an unknown voice before any spawn", async () => {
+    // Validation-only: the 400 lands before TTS spawns anything, so no
+    // audio side effects and no engine needed.
+    const res = await fetch(`${BASE}/v1/voice/speak`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({ text: "hola", voice: "nope-not-a-voice" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: { code: string; field?: string };
+    };
+    expect(body.error.code).toBe("invalid_voice");
+    expect(body.error.field).toBe("voice");
+    // Blank voice behaves as omitted (per-language default) — it must NOT
+    // 400 as invalid_voice. Without an engine this 500s as misconfigured
+    // (loud, never silent); with one it speaks. Either way the voice
+    // param itself validates clean.
+    const blank = await fetch(`${BASE}/v1/voice/speak`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({ text: "hola", voice: "  " }),
+    });
+    if (blank.status === 400) {
+      const blankBody = (await blank.json()) as {
+        error: { code: string };
+      };
+      expect(blankBody.error.code).not.toBe("invalid_voice");
+    }
+  });
+
+  // Live audio only: needs the pi-listen engine + speakers. Excluded by
+  // default; run with SMARTPC_TTS_LIVE=1 for the full ok-path proof
+  // (response carries the resolved `model`).
+  const live = process.env.SMARTPC_TTS_LIVE === "1" ? test : test.skip;
+  live("T3 voice: live speak answers ok with the resolved model", async () => {
+    const res = await fetch(`${BASE}/v1/voice/speak`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({ text: "hola" }),
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      ok: boolean;
+      estimated_ms: number;
+      model: string;
+    };
+    expect(body.ok).toBe(true);
+    expect(typeof body.estimated_ms).toBe("number");
+    expect(typeof body.model).toBe("string");
+    await fetch(`${BASE}/v1/voice/speak-stop`, {
+      method: "POST",
+      headers: gate,
+    });
   });
 });

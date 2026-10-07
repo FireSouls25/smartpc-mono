@@ -45,3 +45,90 @@ pub fn focused_app() -> Option<FocusedApp> {
         pid: w.process_id.to_string(),
     })
 }
+
+/// Machine hostname for tool JSON only — NEVER rendered into the prompt
+/// (safety P2: the prompt carries mem/cpu/display lines, not identity).
+/// Empty when undetectable (containers, locked-down hosts).
+pub fn hostname() -> String {
+    sysinfo::System::host_name()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|h| !h.trim().is_empty())
+        })
+        .unwrap_or_default()
+}
+
+/// Screen-lock probe for screenshot gating. `Unknown` is the honest answer
+/// on platforms without a lock signal — and it blocks capture (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockState {
+    Locked,
+    Unlocked,
+    Unknown,
+}
+
+pub fn lock_state() -> LockState {
+    #[cfg(target_os = "linux")]
+    return linux_lock_state();
+    #[cfg(target_os = "macos")]
+    return macos_lock_state();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return LockState::Unknown;
+}
+
+/// systemd `LockedHint` per session: any "yes" → Locked; sessions listed
+/// and none locked → Unlocked; loginctl missing/failing → Unknown.
+#[cfg(target_os = "linux")]
+fn linux_lock_state() -> LockState {
+    let list = std::process::Command::new("loginctl")
+        .args(["list-sessions", "--no-legend"])
+        .output();
+    let Ok(list) = list else {
+        return LockState::Unknown;
+    };
+    if !list.status.success() {
+        return LockState::Unknown;
+    }
+    let ids: Vec<String> = String::from_utf8_lossy(&list.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+    if ids.is_empty() {
+        return LockState::Unknown;
+    }
+    let mut queried = 0u32;
+    for id in ids {
+        let hint = std::process::Command::new("loginctl")
+            .args(["show-session", &id, "-p", "LockedHint", "--value"])
+            .output();
+        let Ok(hint) = hint else { continue };
+        if !hint.status.success() {
+            continue;
+        }
+        queried += 1;
+        if String::from_utf8_lossy(&hint.stdout).trim().eq_ignore_ascii_case("yes") {
+            return LockState::Locked;
+        }
+    }
+    if queried == 0 {
+        LockState::Unknown
+    } else {
+        LockState::Unlocked
+    }
+}
+
+/// ScreenSaverEngine owning the session → Locked; absent → Unlocked;
+/// `pgrep` itself failing → Unknown.
+#[cfg(target_os = "macos")]
+fn macos_lock_state() -> LockState {
+    match std::process::Command::new("pgrep")
+        .args(["-x", "ScreenSaverEngine"])
+        .output()
+    {
+        Ok(out) if out.status.success() => LockState::Locked,
+        Ok(_) => LockState::Unlocked,
+        Err(_) => LockState::Unknown,
+    }
+}
