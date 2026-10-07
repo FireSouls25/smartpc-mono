@@ -117,6 +117,11 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► pi --mode rpc
 
 ## Rollout (behind `PI_HARNESS=1`, default off)
 
+> Expansion (approved design, see `docs/12-expansion-design.md`): T2 builds a
+> `confirm_if_needed` gate + deny-by-default `extension_ui_request` routing on
+> this supervisor seam; T4 threads per-turn/per-session budgets and dry-run
+> through it. Laya-style ML safety is explicitly out — deterministic matrix.
+
 - Phase 1 (implemented): `src/native/src/pi/` —
   `supervisor.rs` (per-user spawn, strict-\n JSONL, id correlation, turn
   mutex, catalog cache, dialog auto-policy), `turn.rs` (SQLite session-file

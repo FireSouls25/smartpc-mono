@@ -4,6 +4,11 @@ Implemented 2026-09-18. Press (or say "hey"), talk, pause — the silence
 finalizes the utterance, whisper transcribes on-device, the text is sent to
 the agent as if typed. No finish button, no finish keyword, no network.
 
+> Expansion (approved design, see `docs/12-expansion-design.md`): sentence-chunk
+> speak queue + per-chunk estimates + `● i/n` progress (A1), Piper voice catalog
+> (`GET /v1/voice/tts-models`) + per-lang pref + test-play (B), barge-in race fix;
+> Rust-owned playback with real speech events stays a proposal (A2).
+
 ## Pipeline
 
 ```text

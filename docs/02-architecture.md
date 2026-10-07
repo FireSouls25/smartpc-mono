@@ -70,6 +70,14 @@ has no React: `react`/`react-dom`/`motion`/`@vitejs/plugin-react` removed,
 
 ## Sidecar contract (renderer view)
 
+> Expansion (approved design, see `docs/12-expansion-design.md`): the 6-tool
+> catalog grows to ~13 (`get_display_info`, `capture_screen`, `open_url`,
+> `mouse_move/click/scroll`, `key_combo`; `type_text` tightens to 200/call +
+> 1000/turn). Risk stays Low/Medium/High with a single `policy.allows(risk)`
+> predicate (env `HARNESS_ALLOW_RISKY` OR the Settings risky-toggle) plus a
+> deny-by-default confirmation gate for Medium/High and per-turn + per-session
+> budgets. Single PROTOCOL 3 → 4 covers the union.
+
 - Gate: `X-Sidecar-Token` on every `/v1/*`; `/health` open (liveness).
 - Auth: `POST /v1/auth/register|login|refresh|logout`, `GET /v1/auth/me`,
   `DELETE /v1/auth/account`; `{error:{code,message}}` envelope
