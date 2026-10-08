@@ -184,7 +184,6 @@
         {#if m.role === "user"}
           <div class="msg-in flex justify-end">
             <div class="flex max-w-[85%] flex-col items-end gap-1">
-              <p class="hud-label" style="color: var(--info);">USER DISPATCH</p>
               <p class="bubble-user">{m.text}</p>
             </div>
           </div>
