@@ -321,15 +321,37 @@ body {
     font-size: 0.875rem;
     max-width: 100%;
   }
-  .bubble-assistant {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-left: 2px solid var(--accent);
+  /* Assistant replies: full-width running text (regular chatbot read),
+  not a bubble. Formatted by reply.format.ts (house convention). */
+  .reply-text {
     color: var(--fg);
-    border-radius: 0;
-    padding: 0.625rem 0.75rem;
     font-size: 0.875rem;
-    max-width: 85%;
+    line-height: 1.6;
+    max-width: 100%;
+  }
+  .reply-text p {
+    margin: 0 0 0.625rem;
+  }
+  .reply-text p:last-child,
+  .reply-text ul:last-child {
+    margin-bottom: 0;
+  }
+  .reply-text ul {
+    margin: 0 0 0.625rem;
+    padding-left: 1.25rem;
+    list-style: disc;
+  }
+  .reply-text li {
+    margin: 0.125rem 0;
+  }
+  .reply-text li::marker {
+    color: var(--accent);
+  }
+  .reply-text strong {
+    font-weight: 700;
+  }
+  .reply-text em {
+    font-style: italic;
   }
   /* Flat canvas: no dotted backdrop — gutters carry the structure. */
   .dot-bg {

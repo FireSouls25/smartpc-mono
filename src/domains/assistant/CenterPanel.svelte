@@ -190,10 +190,10 @@
           </div>
         {:else}
           <div class="msg-in flex justify-start">
-            <div class="flex max-w-[85%] flex-col gap-1">
-              <p class="bubble-assistant" style="max-width: 100%;">
+            <div class="flex w-full flex-col gap-1">
+              <div class="reply-text">
                 {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
-              </p>
+              </div>
               {#if m.steps?.length}
                 <div class="flex flex-wrap gap-1 pl-1">
                   {#each m.steps as st, j (j)}
