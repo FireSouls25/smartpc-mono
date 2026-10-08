@@ -573,7 +573,7 @@ mod tests {
         );
         assert_eq!(
             resolve_tts_model("es", Some("kokoro-int8-multi-lang-v1_0#28")),
-            Ok(("kokoro-int8-multi-lang-v1_0", Some(28)))
+            Err("unknown tts voice: kokoro-int8-multi-lang-v1_0#28".to_string())
         );
         // Plain model ids mean the model default sid.
         assert_eq!(
