@@ -124,8 +124,16 @@ pub async fn speak(
         .filter(|l| !l.trim().is_empty())
         .unwrap_or("es");
     // Resolve first so an unknown voice fails closed before any spawn.
-    let model = match crate::tts::resolve_tts_model(lang, b.voice.as_deref()) {
-        Ok(m) => m,
+    // The composite id (what the catalog and the client know) echoes back
+    // in every ok response, including the superseded one below.
+    let voice_id = match crate::tts::resolve_tts_model(lang, b.voice.as_deref()) {
+        Ok(_) => b
+            .voice
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| crate::tts::tts_model_for_lang(lang))
+            .to_string(),
         Err(msg) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -148,7 +156,7 @@ pub async fn speak(
                 // (the client drops the stale chunk by generation anyway).
                 return (
                     StatusCode::OK,
-                    Json(serde_json::json!({ "ok": true, "estimated_ms": 0, "model": model })),
+                    Json(serde_json::json!({ "ok": true, "estimated_ms": 0, "model": voice_id })),
                 )
                     .into_response();
             }
@@ -175,12 +183,12 @@ pub async fn speak(
     }
 }
 
-/// TTS voice catalog (A1 read-only; no DELETE — uninstalling a voice is
-/// out of scope). Always 200: empty `models` means the pi-listen voice
+/// TTS voice catalog. Always 200: empty `models` means the pi-listen voice
 /// extension is missing. `active` is always null — the sidecar stays
 /// stateless per call (the renderer keeps its `ttsVoice` pref).
-/// `ready` mirrors the STT `models_ready` shape (per-id download state;
-/// true while the engine is present — pi-listen owns the voice files).
+/// `ready` mirrors the STT `models_ready` shape (per-id download state:
+/// `<tts-home>/.pi/models/tts/<model>/tokens.txt` presence — sid entries
+/// share one model dir, so their flags flip together).
 pub async fn tts_models(State(s): State<AppState>) -> impl IntoResponse {
     let present = s.tts.engine_present();
     let models: Vec<serde_json::Value> = if present {
@@ -191,6 +199,7 @@ pub async fn tts_models(State(s): State<AppState>) -> impl IntoResponse {
                     "id": v.id,
                     "lang": v.lang,
                     "label": v.label,
+                    "gender": v.gender,
                     "size_mb": v.size_mb,
                     "quality": v.quality,
                 })
@@ -201,9 +210,16 @@ pub async fn tts_models(State(s): State<AppState>) -> impl IntoResponse {
     };
     let ready: std::collections::BTreeMap<&str, bool> = crate::tts::TTS_CATALOG
         .iter()
-        .map(|v| (v.id, present))
+        .map(|v| {
+            let installed = present
+                && v.id
+                    .split('#')
+                    .next()
+                    .is_some_and(|m| s.tts.model_installed(m));
+            (v.id, installed)
+        })
         .collect();
-    let defaults: std::collections::BTreeMap<&str, &str> = ["es", "en", "fr", "de", "it", "pt", "hi"]
+    let defaults: std::collections::BTreeMap<&str, &str> = ["es", "en"]
         .into_iter()
         .map(|l| (l, crate::tts::tts_model_for_lang(l)))
         .collect();
@@ -213,6 +229,34 @@ pub async fn tts_models(State(s): State<AppState>) -> impl IntoResponse {
         "active": serde_json::Value::Null,
         "ready": ready,
     }))
+}
+
+/// Uninstall a downloaded TTS voice model. Idempotent: a missing dir
+/// still answers ok (removed=false); unknown catalog ids 400
+/// (`invalid_voice`, mirroring speak). Sid entries share one model dir,
+/// so removing one removes them all. The next speak re-downloads on
+/// demand — uninstalling the active voice only costs one download.
+/// Stops playback first (never delete audio out from under the player).
+/// New HTTP surface: see PROTOCOL (bumped for this).
+pub async fn delete_tts_model(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let id = id.trim().to_string();
+    match s.tts.remove_model(&id) {
+        Ok(removed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "removed": removed })),
+        )
+            .into_response(),
+        Err(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": { "code": "invalid_voice", "message": msg, "field": "voice" }
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// Cut active speech immediately. Always ok (idempotent).

@@ -8,15 +8,11 @@
 //!   synthesized (`"Display {id}"`), `refresh_hz` is 0.0 (unknown) and
 //!   `primary` is a heuristic (display at the origin, else the first).
 //!
-//! Bytes never touch disk: shots live in a capped in-memory store (5
-//! entries LRU, 60 s TTL, consume-once via [`take_shot`]) and never enter
-//! tool results, logs or exports — tools return reference + metadata only.
-//! There is deliberately NO `get_shot` tool (bytes never enter tool
-//! results); `take_shot` is the consume-once accessor for future
-//! in-process consumers (e.g. grounded mouse targeting).
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+//! Bytes never touch disk — and since nothing consumes them yet (no model
+//! image path, no UI preview), frames are validated (size cap) then dropped
+//! immediately: tools return metadata only. There is deliberately NO `get_shot`
+//! tool and no retained store. (If a viewer ever lands, re-add a capped store
+//! here; the grounding gate in `budget.rs` only needs success/failure.)
 
 use serde::Serialize;
 
@@ -231,100 +227,6 @@ pub fn capture_png(
     })
 }
 
-// ---------------------------------------------------------------------------
-// In-memory shot store: cap 5 LRU, 60 s TTL, destructive take
-// ---------------------------------------------------------------------------
-
-pub const SHOT_TTL: Duration = Duration::from_secs(60);
-const SHOT_CAP: usize = 5;
-
-struct Stored {
-    png: Vec<u8>,
-    at: Instant,
-}
-
-struct ShotStore {
-    next: u64,
-    order: VecDeque<String>,
-    map: HashMap<String, Stored>,
-}
-
-impl ShotStore {
-    fn prune_locked(&mut self) {
-        let now = Instant::now();
-        let expired: Vec<String> = self
-            .map
-            .iter()
-            .filter(|(_, s)| now.duration_since(s.at) >= SHOT_TTL)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for id in expired {
-            self.remove_locked(&id);
-        }
-    }
-
-    fn remove_locked(&mut self, id: &str) {
-        if let Some(mut s) = self.map.remove(id) {
-            // Best-effort wipe: no pixel bytes linger after eviction/expiry.
-            for b in s.png.iter_mut() {
-                *b = 0;
-            }
-        }
-        self.order.retain(|k| k != id);
-    }
-}
-
-static SHOTS: OnceLock<Mutex<ShotStore>> = OnceLock::new();
-
-fn shots() -> &'static Mutex<ShotStore> {
-    SHOTS.get_or_init(|| {
-        Mutex::new(ShotStore {
-            next: 1,
-            order: VecDeque::new(),
-            map: HashMap::new(),
-        })
-    })
-}
-
-/// Store a captured frame, returning its id. Evicts oldest past cap 5.
-pub fn store_shot(png: Vec<u8>) -> String {
-    let mut store = shots().lock().unwrap_or_else(|e| e.into_inner());
-    store.prune_locked();
-    let id = format!("shot-{}-{}", std::process::id(), store.next);
-    store.next += 1;
-    store.order.push_back(id.clone());
-    store.map.insert(
-        id.clone(),
-        Stored {
-            png,
-            at: Instant::now(),
-        },
-    );
-    while store.map.len() > SHOT_CAP {
-        if let Some(oldest) = store.order.front().cloned() {
-            store.remove_locked(&oldest);
-        } else {
-            break;
-        }
-    }
-    id
-}
-
-/// Destructive, TTL-enforced take: exactly one consumer ever sees the
-/// bytes; expired ids vanish as if never stored.
-pub fn take_shot(id: &str) -> Option<Vec<u8>> {
-    let mut store = shots().lock().unwrap_or_else(|e| e.into_inner());
-    store.prune_locked();
-    let stored = store.map.remove(id)?;
-    store.order.retain(|k| k != id);
-    Some(stored.png)
-}
-
-#[cfg(test)]
-pub(crate) fn shot_count() -> usize {
-    shots().lock().unwrap_or_else(|e| e.into_inner()).map.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,33 +266,5 @@ mod tests {
             ds.iter().filter(|d| d.primary).count(),
             usize::from(!ds.is_empty())
         );
-    }
-
-    #[test]
-    fn shot_store_caps_lru_and_takes_destructively() {
-        // Isolate from other tests: drain first.
-        for _ in 0..16 {
-            store_shot(vec![1, 2, 3]);
-        }
-        assert_eq!(shot_count(), SHOT_CAP);
-        let id = store_shot(vec![9; 10]);
-        assert_eq!(shot_count(), SHOT_CAP);
-        let bytes = take_shot(&id).expect("fresh shot must be takeable");
-        assert_eq!(bytes.len(), 10);
-        assert!(take_shot(&id).is_none(), "take is consume-once");
-        assert!(take_shot("shot-0-0").is_none(), "unknown ids vanish");
-    }
-
-    #[test]
-    fn expired_shots_vanish() {
-        let id = store_shot(vec![7; 4]);
-        // Age the entry past TTL directly.
-        {
-            let mut store = shots().lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = store.map.get_mut(&id) {
-                s.at = Instant::now() - SHOT_TTL - Duration::from_secs(1);
-            }
-        }
-        assert!(take_shot(&id).is_none(), "expired shot must vanish");
     }
 }

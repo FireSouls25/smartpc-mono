@@ -30,6 +30,8 @@ export interface TtsModel {
   id: string;
   lang: string;
   label: string;
+  /** "male" | "female" — the dropdown groups by this. */
+  gender: string;
   size_mb: number;
   quality: string;
 }
@@ -96,6 +98,13 @@ export const voiceApi = {
 
   /** TTS voice catalog (always 200; empty models = engine missing). */
   ttsModels: () => api<TtsModelsResponse>("/v1/voice/tts-models"),
+
+  /** Uninstall a downloaded TTS voice model (idempotent). */
+  deleteTtsModel: (id: string) =>
+    api<{ ok: boolean; removed: boolean }>(
+      `/v1/voice/tts-models/${encodeURIComponent(id)}`,
+      { method: "DELETE", timeoutMs: 30000 },
+    ),
 
   stopSpeaking: () =>
     api<{ ok: boolean }>("/v1/voice/speak-stop", {

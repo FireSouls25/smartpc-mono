@@ -337,17 +337,19 @@ fn tool_capture_screen(args: &serde_json::Value, policy: &Policy) -> ToolOutcome
         .unwrap_or(false);
     match super::screen::capture_png(display_id, region, max_width) {
         Ok(shot) => {
+            // No retained store: nothing consumes the pixels yet (no model
+            // image path, no UI preview), so the frame is validated above
+            // and dropped here — metadata only, by design.
             let bytes = shot.png.len();
             let (w, h) = (shot.width, shot.height);
-            let shot_id = super::screen::store_shot(shot.png);
+            drop(shot.png);
             ok(serde_json::json!({
-                "shot_id": shot_id,
                 "display": display_id,
                 "region": region.unwrap_or(Region { x: 0, y: 0, width: geom.0, height: geom.1 }),
                 "size": { "width": w, "height": h },
                 "bytes": bytes,
                 "format": "png",
-                "note": "stored in memory only (cap 5, 60 s TTL, consume-once); bytes never enter tool results, logs or exports",
+                "note": "frame validated and discarded (no viewer yet); metadata only, never in logs or exports",
             })
             .to_string())
         }

@@ -276,9 +276,12 @@
     }
   }
 
-  /** Current-lang-first dropdown (T3 Q3); server default stays first. */
+  /** Current-lang-first dropdown (T3 Q3); server default stays first.
+   * Labels carry the gender tag so masculine/feminine options read apart. */
   function ttsOptions(): { value: string; label: string; hint?: string }[] {
     const lang = getLang();
+    const genderWord = (g: string): string =>
+      g === "female" ? t("voice.fem") : t("voice.masc");
     const models = [...(ttsModels?.models ?? [])].sort((a, b) =>
       a.lang === lang ? (b.lang === lang ? 0 : -1) : b.lang === lang ? 1 : 0,
     );
@@ -286,7 +289,7 @@
       { value: "", label: t("voice.serverDefault") },
       ...models.map((m) => ({
         value: m.id,
-        label: `${m.label} · ~${m.size_mb} MB`,
+        label: `${m.label} (${genderWord(m.gender)}) · ~${m.size_mb} MB`,
         hint:
           ttsModels?.ready?.[m.id] === false
             ? t("voice.notDownloaded")
@@ -310,7 +313,52 @@
     return { name: fallback, ready: ttsModels?.ready?.[fallback] ?? null };
   }
 
+  /** Installed-voice rows, current language first (mirrors ttsOptions). */
+  function ttsRows(): {
+    id: string;
+    label: string;
+    sizeMb: number;
+    ready: boolean;
+    downloading: boolean;
+  }[] {
+    const lang = getLang();
+    return [...(ttsModels?.models ?? [])]
+      .sort((a, b) =>
+        a.lang === lang ? (b.lang === lang ? 0 : -1) : b.lang === lang ? 1 : 0,
+      )
+      .map((m) => ({
+        id: m.id,
+        label: `${m.label} (${m.gender === "female" ? t("voice.fem") : t("voice.masc")})`,
+        sizeMb: m.size_mb,
+        ready: ttsModels?.ready?.[m.id] ?? false,
+        downloading: voice.ttsDownloading === m.id,
+      }));
+  }
+
+  async function downloadTts(id: string): Promise<void> {
+    ttsModelsError = "";
+    if (await voice.downloadTtsVoice(id)) await loadTtsModels();
+    else ttsModelsError = t("voice.speakFailed");
+  }
+
+  async function deleteTtsModel(
+    id: string,
+    label: string,
+    sizeMb: number,
+  ): Promise<void> {
+    ttsModelsError = "";
+    const msg = t("voice.deleteAsk", { name: label, size: String(sizeMb) });
+    if (!window.confirm(msg)) return;
+    try {
+      await voiceApi.deleteTtsModel(id);
+      await loadTtsModels();
+    } catch (err) {
+      ttsModelsError = err instanceof Error ? err.message : "Error";
+    }
+  }
+
   let modelsError = $state("");
+  let ttsModelsError = $state("");
 
   async function deleteSttModel(name: string, sizeMb: number): Promise<void> {
     modelsError = "";
@@ -758,6 +806,60 @@
             {/if}
             {#if ttsError}
               <p class="error-box mt-2">{ttsError}</p>
+            {/if}
+          </div>
+          <div class="group-card">
+            <h3 class="group-title">{t("voice.ttsModels")}</h3>
+            <div class="flex flex-col gap-2">
+              {#each ttsRows() as m (m.id)}
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="chip">
+                    <span
+                      class="dot"
+                      style="background: {m.ready
+                        ? 'var(--success)'
+                        : 'var(--border-strong)'};"
+                    ></span>
+                    {m.label} · ~{m.sizeMb} MB
+                  </span>
+                  <span class="faint text-xs">
+                    {m.downloading
+                      ? t("voice.downloadingTts")
+                      : m.ready
+                        ? t("voice.downloaded")
+                        : t("voice.notDownloaded")}
+                  </span>
+                  {#if m.downloading}
+                    <progress
+                      class="h-1 w-24"
+                      aria-label={t("voice.downloadingTts")}
+                    ></progress>
+                  {:else if !m.ready}
+                    <button
+                      class="btn btn-ghost"
+                      style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                      disabled={voice.ttsDownloading !== null}
+                      onclick={() => void downloadTts(m.id)}
+                      aria-label={`${t("voice.download")}: ${m.label}`}
+                    >
+                      {t("voice.download")}
+                    </button>
+                  {:else}
+                    <button
+                      class="btn btn-ghost"
+                      style="padding: 0.375rem 0.75rem; font-size: 0.75rem;"
+                      onclick={() =>
+                        void deleteTtsModel(m.id, m.label, m.sizeMb)}
+                      aria-label={`${t("voice.deleteModel")}: ${m.label}`}
+                    >
+                      {t("voice.deleteModel")}
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            {#if ttsModelsError}
+              <p class="error-box mt-2">{ttsModelsError}</p>
             {/if}
           </div>
         </div>

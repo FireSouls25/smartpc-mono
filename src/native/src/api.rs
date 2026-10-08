@@ -35,7 +35,10 @@ use crate::{
 /// 200, plus the T3 voice fold-in (`speak.{voice,model}`,
 /// `GET /v1/voice/tts-models`). T1/T2 surfaces ride free (no shape change);
 /// no second bump for T3.
-pub const PROTOCOL: u32 = 4;
+///
+/// v5: `DELETE /v1/voice/tts-models/{id}` (voice uninstall) + per-model
+/// TTS `ready` (real install state instead of engine-present-for-all).
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -184,6 +187,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/voice/events", get(crate::stt::routes::events))
         .route("/v1/voice/speak", post(crate::stt::routes::speak))
         .route("/v1/voice/tts-models", get(crate::stt::routes::tts_models))
+        .route(
+            "/v1/voice/tts-models/{id}",
+            delete(crate::stt::routes::delete_tts_model),
+        )
         .route("/v1/voice/speak-stop", post(crate::stt::routes::speak_stop))
         .route(
             "/v1/voice/models/{name}",

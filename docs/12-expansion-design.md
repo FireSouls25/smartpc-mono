@@ -60,11 +60,17 @@ EnumDisplayMonitors → CoreGraphics; any failure → empty, never error.
 ### capture_screen (High, records_action:true, "Captura de pantalla")
 
 `{display?, region?, max_width? (default 960, 320–1280), format:"png"}` →
-`{shot_id, display, region, size, bytes, format, note}` — reference +
-metadata only, bytes NEVER in tool results/logs/exports. Pipeline: OS capture
+`{display, region, size, bytes, format, note}` — metadata only, bytes NEVER
+in tool results/logs/exports. Pipeline: OS capture
 (X11/xcb-image, Wayland portal, DXGI, CGWindowListCreateImage) → downscale
-(no upscale) → PNG squeeze to ≤200 KB (else `ok:false`) → in-memory shot
-store (cap 5, LRU, never disk).
+(no upscale) → PNG squeeze to ≤200 KB (else `ok:false`) → frame validated
+then discarded (no viewer yet: no model image path, no UI preview).
+
+AS-BUILT (cleanup pass): the retained shot store (`store_shot`/`take_shot`,
+cap-5 LRU, 60 s TTL) was removed — nothing ever consumed it, so it was pure
+dead weight plus two `dead_code` warnings. The result carries no `shot_id`;
+the grounding gate (success/failure per turn) is unaffected. If a viewer
+ever lands, re-add a capped store at that point.
 
 ADOPTED safety P0-b fixes: (1) lock check fails **closed** (`unknown` →
 `ShotError::Locked`); (2) title deny-list extended (case-insensitive):
@@ -73,8 +79,9 @@ passkey, pin, bank`; (3) description + denial copy state disclosure:
 "Captures pixels visible on screen (may include secrets) and sends them to
 the model. Requires risky consent."; (4) T1 open Q1 resolved: `get_shot`
 REJECTED for v1 (bytes never enter tool results).
-ADOPTED safety P1: 60 s TTL + destructive `take_shot` (consume-once, zeroed);
-audit rows carry size-only (no `region`).
+ADOPTED safety P1 (partially superseded): audit rows carry size-only (no
+`region`); the TTL + destructive-take half fell away with the store removal
+above — nothing is retained, so there is nothing to expire.
 T1 open Q2 resolved: keep 960 px / 200 KB defaults.
 
 New deps: `screenshots 0.2` + `image 0.25` (no model/ONNX). `pi-bridge`
@@ -155,11 +162,19 @@ manual → silent + diagnostic). Empty split → no POSTs.
 
 ### Voice catalog + selection + test-play (ships now)
 
-`GET /v1/voice/tts-models` → `{models:[{id (piper-… prefix required), lang,
-label, size_mb, quality}], default_for_lang, active}`; `ready` mirrors STT
-`models_ready`; always 200 (empty = engine missing). `POST /v1/voice/speak`
+`GET /v1/voice/tts-models` → `{models:[{id, lang, label, gender,
+size_mb, quality}], default_for_lang, active}` (`gender` additive, no bump);
+`ready` mirrors STT `models_ready`; always 200 (empty = engine missing).
+Voice ids are pi-listen model ids with optional `#<sid>` for multi-voice
+models (sid rides `ttsLocalVoiceId`); the sid half is validated by whole-id
+catalog match, so crafted suffixes fail closed. Catalog: en 2 masculine +
+2 feminine (Kitten Nano sids 0/2 + 1/3, shared 25 MB model, M1 default); es
+is Davefx alone — the two Kokoro es sids (Álex/Dora, kokoro-int8-multi-lang-
+v1_0) were REMOVED after a live failure proved that model emits NaN samples
+(pi-listen refuses it outright; neither v1_1 nor fp32 v1_0 ships es voices).
+A 2nd es voice of either gender needs an upstream model first. `POST /v1/voice/speak`
 gains optional `voice` (unknown → 400 `invalid_voice`); response gains
-`model` (resolved id, additive). `write_tts_config` takes the resolved model;
+`model` (composite voice id, additive). `write_tts_config` takes model + sid;
 hardcoded table stays as fallback default.
 
 Pref: localStorage `smartpc.voice.ttsVoice.<lang>` (preference, not secret —
@@ -168,10 +183,18 @@ Settings "Voz de lectura" group: lang-first dropdown + ready badges +
 test-play (canned ~60-char phrase, indeterminate `downloading` progress, 180 s
 budget) + `effectiveTts()` line. i18n: `voice.ttsVoice/ttsVoiceHint/testPlay/
 testing/downloadingTts/testPhrase/chunkProgress` + `speakHint` rewritten to
-Piper (es contract, en parity). TTS-model DELETE: out of A1 scope (catalog
-read-only; T3 Q1 resolved). Dropdown: current-lang-first (T3 Q3 resolved).
+Piper (es contract, en parity). Dropdown: current-lang-first (T3 Q3 resolved).
 A2 speech-events channel: multiplex `channel:"tts"` on the existing poll
 (T3 Q2 resolved).
+
+AS-BUILT (voice-panel pass): catalog trimmed to es + en (operator decision —
+the UI supports only those two; `default_for_lang` likewise); `gender` per
+entry; `DELETE /v1/voice/tts-models/{id}` implemented after all (uninstall
+with stop-first + idempotency, so TTS matches the STT panel: install state,
+download-via-test-play with indeterminate progress, per-row remove); TTS
+`ready` is now real per-model install state
+(`<tts-home>/.pi/models/tts/<model>/tokens.txt`); PROTOCOL 5 covers the
+new route + the `ready` semantics change.
 
 ### A2 playback takeover (proposal, NOT built)
 
@@ -252,6 +275,9 @@ One bump covering: `speak.{voice,model}`, `GET /v1/voice/tts-models`,
 check + contract test advance together. T1/T2 surfaces ride free (no shape
 change).
 
+PROTOCOL 5 (voice-panel pass): `DELETE /v1/voice/tts-models/{id}` +
+per-model TTS `ready` semantics + `gender` on catalog entries.
+
 ## 6. Build order (binding, from §Merge order)
 
 T1 → T2 → T4 (issues the bump) → T3 last. Contract tests land in merge order
@@ -260,7 +286,7 @@ T1 → T2 → T4 (issues the bump) → T3 last. Contract tests land in merge ord
 ## 7. Test summary (per-track plans are normative)
 
 Rust unit (mapping fns, validation, budget truth tables, TTL, deny-list,
-store LRU, generation re-check) · contract (`sidecar.contract.test.ts`:
+generation re-check, voice gender counts + sid resolution) · contract (`sidecar.contract.test.ts`:
 new keys/shapes, `javascript:` refusal, `invalid_voice`, prefs round-trip,
 audit redaction, preview creates no Actions) · headless-safe E2E (no
 display/mic; real-speech gated behind `SMARTPC_TTS_LIVE=1`; launch-success
