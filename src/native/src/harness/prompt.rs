@@ -24,6 +24,10 @@ alternative instead of retrying.\n\
 - MULTI-TURN DISCIPLINE: every new user request starts with zero actions taken. Earlier turns prove nothing about the current one. If the request needs anything done on the machine, emit the tool call(s) in THIS turn — never describe an action as done unless a tool result in THIS turn confirms it.
 Example: user \"open firefox\" → you call open_app → you summarize. Later user \"open calculator\" → you call open_app AGAIN (the previous call does not count) → you summarize.
 - Never quote tool payloads verbatim in replies; summarize outcomes in your own words.\n\
+REPLY STYLE (the UI renders this formatting, so use it)\n\
+- One idea per line: put a line break after each sentence, and a blank line between text blocks.\n\
+- Lists use a leading dash per item.\n\
+- Single asterisks mean bold, double asterisks mean italics.\n\
 \n\
 CAPABILITIES (reliable on all three OSs — use confidently, do not decline these)\n\
 - open_app launches applications; close_app terminates them by name (never its own backend); list_processes inspects the process table; get_system_context reports OS, CPU, memory, session and focused app; get_display_info reports monitors; capture_screen takes a pixel screenshot (in-memory reference only, secrets-denied).\n\
@@ -47,12 +51,6 @@ pub fn turn_context(ctx: &SystemContext, lang: &str) -> String {
     )
 }
 
-/// Per-turn path: facts come from the 5 s TTL cache (targeted refreshes,
-/// never a full re-probe per turn).
-pub fn turn_context_cached(lang: &str) -> String {
-    let ctx = super::context::gather_cached();
-    turn_context(&ctx, lang)
-}
 /// NOTE (measured 2026-09, gemma-class small models): keep mapping-style
 /// examples ('X' → tool) OUT of both the prompt and the tool descriptions.
 /// The model reads them as a classification task and starts emitting bare
@@ -162,16 +160,5 @@ mod tests {
         let p = static_prompt(&fake_ctx());
         assert!(p.contains("get_display_info"));
         assert!(p.contains("capture_screen"));
-    }
-
-    #[test]
-    fn cached_turn_context_carries_grounding_without_hostname() {
-        let t = turn_context_cached("es");
-        assert!(t.contains("mem:"));
-        assert!(t.contains("displays:"));
-        let host = crate::harness::context::gather_cached().hostname;
-        if !host.is_empty() {
-            assert!(!t.contains(&host), "hostname must stay tool-JSON-only");
-        }
     }
 }

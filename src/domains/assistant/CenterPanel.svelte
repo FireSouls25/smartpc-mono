@@ -3,6 +3,7 @@
   import SelectMenu from "../../shared/SelectMenu.svelte";
   import ProviderStart from "./ProviderStart.svelte";
   import { chatStore as chat } from "./chat.store.svelte";
+  import { formatReply } from "./reply.format";
   import { providerStore as providers } from "./providers.store.svelte";
   import { sessionStore as sessions } from "./sessions.store.svelte";
   import { voice } from "../voice/voice.store.svelte";
@@ -191,7 +192,7 @@
           <div class="msg-in flex justify-start">
             <div class="flex max-w-[85%] flex-col gap-1">
               <p class="bubble-assistant" style="max-width: 100%;">
-                {m.textKey ? t(m.textKey) : m.text}
+                {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
               </p>
               {#if m.steps?.length}
                 <div class="flex flex-wrap gap-1 pl-1">
