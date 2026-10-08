@@ -51,6 +51,9 @@ export const es = {
   "chat.provider": "Proveedor",
   "chat.model": "Modelo",
   "chat.hello": "Hola, ¿qué hacemos hoy?",
+  "chat.replay": "Reproducir voz",
+  "chat.copy": "Copiar texto",
+  "chat.copied": "¡Copiado!",
   "chat.timeout": "La respuesta tardó demasiado; inténtalo de nuevo.",
   "agent.title": "Conversación del agente",
   "agent.connected": "Conectado",
@@ -65,8 +68,12 @@ export const es = {
   "voice.speakHint":
     "Voz local Piper, sin red. La primera vez descarga el modelo (~60 MB).",
   "voice.ttsVoice": "Voz de lectura",
+  "voice.ttsModels": "Modelos de voz",
+  "voice.download": "Descargar",
+  "voice.masc": "masculina",
+  "voice.fem": "femenina",
   "voice.ttsVoiceHint":
-    "Voz de Piper por idioma. Se guarda en este equipo; el servidor no la recuerda.",
+    "Voces locales por idioma (Piper, Kitten, Kokoro, sin red). Se guarda en este equipo; el servidor no la recuerda.",
   "voice.testPlay": "Probar voz",
   "voice.testing": "Reproduciendo prueba…",
   "voice.downloadingTts": "Descargando el modelo de voz (solo la primera vez)…",

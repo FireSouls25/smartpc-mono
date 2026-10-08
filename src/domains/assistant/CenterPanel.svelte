@@ -18,6 +18,45 @@
 
   let scrollEl: HTMLDivElement | null = null;
 
+  // Per-message actions (replay voice, copy plain text). `copiedKey`
+  // shows brief feedback on the message just copied.
+  let copiedKey = $state<string | null>(null);
+  let copiedTimer: number | null = null;
+
+  /** Plain-text copy: drop house markers (asterisks, list dashes). */
+  function plainText(raw: string | undefined): string {
+    if (!raw) return "";
+    return raw
+      .replace(/\*/g, "")
+      .replace(/^- /gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  async function copyText(key: string, raw: string | undefined): Promise<void> {
+    const text = plainText(raw);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Non-secure contexts (plain http/file): legacy fallback.
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    copiedKey = key;
+    if (copiedTimer !== null) window.clearTimeout(copiedTimer);
+    copiedTimer = window.setTimeout(() => {
+      copiedKey = null;
+      copiedTimer = null;
+    }, 1500);
+  }
+
   // Follow the conversation while the user stays near the bottom;
   // never yank them away when they scrolled up to read history.
   $effect(() => {
@@ -195,6 +234,72 @@
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
                 {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
               </div>
+              {#if m.text}
+                <div class="flex items-center gap-1 pt-1">
+                  <button
+                    type="button"
+                    class="icon-btn"
+                    style="padding: 0.25rem;"
+                    title={t("chat.replay")}
+                    aria-label={t("chat.replay")}
+                    onclick={() => void voice.speakText(m.text ?? "")}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      class="h-4 w-4"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.8"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M11 5 6 9H3v6h3l5 4z" />
+                      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+                      <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn"
+                    style="padding: 0.25rem;"
+                    title={copiedKey === (m.id ?? `local-${i}`)
+                      ? t("chat.copied")
+                      : t("chat.copy")}
+                    aria-label={t("chat.copy")}
+                    onclick={() => void copyText(m.id ?? `local-${i}`, m.text)}
+                  >
+                    {#if copiedKey === (m.id ?? `local-${i}`)}
+                      <svg
+                        viewBox="0 0 24 24"
+                        class="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M20 6 9 17l-5-5" />
+                      </svg>
+                    {:else}
+                      <svg
+                        viewBox="0 0 24 24"
+                        class="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.8"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <rect x="9" y="9" width="12" height="12" rx="0" />
+                        <path d="M5 15H4V3h12v1" />
+                      </svg>
+                    {/if}
+                  </button>
+                </div>
+              {/if}
               {#if m.steps?.length}
                 <div class="flex flex-wrap gap-1 pl-1">
                   {#each m.steps as st, j (j)}

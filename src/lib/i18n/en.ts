@@ -51,6 +51,9 @@ export const en: Record<I18nKey, string> = {
   "chat.provider": "Provider",
   "chat.model": "Model",
   "chat.hello": "Hi, what shall we do today?",
+  "chat.replay": "Replay voice",
+  "chat.copy": "Copy text",
+  "chat.copied": "Copied!",
   "chat.timeout": "The response took too long; try again.",
   "agent.title": "Agent conversation",
   "agent.connected": "Connected",
@@ -65,8 +68,12 @@ export const en: Record<I18nKey, string> = {
   "voice.speakHint":
     "Local Piper voice, offline. First use downloads the model (~60 MB).",
   "voice.ttsVoice": "Reading voice",
+  "voice.ttsModels": "Voice models",
+  "voice.download": "Download",
+  "voice.masc": "masculine",
+  "voice.fem": "feminine",
   "voice.ttsVoiceHint":
-    "Per-language Piper voice. Stored on this device; the server keeps none.",
+    "Local per-language voices (Piper, Kitten, Kokoro, offline). Stored on this device; the server keeps none.",
   "voice.testPlay": "Test voice",
   "voice.testing": "Playing test…",
   "voice.downloadingTts": "Downloading the voice model (first time only)…",
