@@ -92,35 +92,4 @@
     <ApiKeyModal />
   </div>
   <!-- Persistent status line: only real state, never invented telemetry. -->
-  <footer
-    class="mono flex h-7 shrink-0 items-center justify-between gap-3 px-3 text-[11px]"
-    style="background: var(--crust); border-top: 1px solid var(--border); color: var(--fg-muted);"
-  >
-    <span class="flex items-center gap-2">
-      <span
-        class="dot"
-        style="background: {protoOk && providers.activeAvailable()
-          ? 'var(--success)'
-          : 'var(--warn)'};"
-      ></span>
-      <span class="hud-label" style="color: var(--fg);">
-        {protoOk ? "SYSTEM ONLINE" : "PROTOCOL MISMATCH"}
-      </span>
-      <span class="faint hidden sm:inline">·</span>
-      <span class="hidden sm:inline">ENGINE: {engineLabel()}</span>
-    </span>
-    <span class="flex items-center gap-2">
-      <span class="hidden md:inline">
-        {providers.activeProvider}{providers.activeModel
-          ? ` / ${providers.activeModel}`
-          : ""}
-      </span>
-      <span class="faint hidden md:inline">|</span>
-      <span>
-        {sessions.activeSessionId
-          ? `SESSION ${sessions.activeSessionId.slice(0, 8).toUpperCase()}`
-          : "NO SESSION"}
-      </span>
-    </span>
-  </footer>
 </div>
