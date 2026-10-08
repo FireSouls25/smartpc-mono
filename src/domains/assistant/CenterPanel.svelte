@@ -178,7 +178,7 @@
   <div class="panel-body min-h-0 flex-1">
     <div
       bind:this={scrollEl}
-      class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
+      class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto"
       aria-live="polite"
     >
       {#each chat.messages as m, i (m.id ?? `local-${i}`)}
