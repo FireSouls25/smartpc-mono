@@ -409,32 +409,14 @@
           {/if}
         </button>
       </div>
-      <div
-        class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 pt-1.5 text-[10px] uppercase tracking-widest"
-        style="color: var(--fg-faint);"
-      >
-        <span>PTT ({displayHotkey(voice.hotkey)})</span>
-        {#if voice.listening && !voice.capturing && voice.mode === "wake"}
+      {#if voice.listening && !voice.capturing && voice.mode === "wake"}
+        <div
+          class="mono flex flex-wrap items-center gap-x-3 gap-y-1 px-1 pt-1.5 text-[10px] uppercase tracking-widest"
+          style="color: var(--fg-faint);"
+        >
           <span>{t("voice.sayHey", { word: voice.wakeWord })}</span>
-        {/if}
-        {#if voice.speaking}
-          <button
-            type="button"
-            class="underline"
-            style="color: var(--accent);"
-            onclick={() => void voice.stopSpeaking()}
-          >
-            {#if voice.speakChunkCount > 1}
-              {t("voice.chunkProgress", {
-                i: String(voice.speakChunkIndex),
-                n: String(voice.speakChunkCount),
-              })} ✕
-            {:else}
-              {t("voice.speaking")} ✕
-            {/if}
-          </button>
-        {/if}
-      </div>
+        </div>
+      {/if}
     </form>
     {#if voice.error}
       <p class="error-box">{voice.error}</p>
