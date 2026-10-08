@@ -1,5 +1,6 @@
 <script lang="ts">
   import { auth } from "../domains/auth/auth.store.svelte";
+  import { ApiError } from "../lib/api";
   import { t } from "../lib/i18n.svelte";
   import { navigate, syncAuthRoute } from "../app/router.svelte";
   import Logo from "./Logo.svelte";
@@ -38,10 +39,33 @@
       }
       navigate("");
     } catch (err) {
-      error = err instanceof Error ? err.message : "Error";
+      error = authErrorText(err);
     } finally {
       busy = false;
     }
+  }
+
+  /** Server auth errors arrive in English: map known codes to i18n. */
+  function authErrorText(err: unknown): string {
+    if (err instanceof ApiError) {
+      switch (err.code) {
+        case "invalid_credentials":
+          return t("auth.invalidCredentials");
+        case "email_taken":
+          return t("auth.emailTaken");
+        case "cloud_account":
+          return t("auth.cloudAccount");
+        case "email_conflict":
+          return t("auth.emailConflict");
+        case "cloud_unavailable":
+          return t("auth.cloudUnavailable");
+        case "invalid_token":
+          return t("auth.invalidToken");
+        default:
+          break;
+      }
+    }
+    return err instanceof Error ? err.message : "Error";
   }
 
   function switchMode() {

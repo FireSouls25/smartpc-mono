@@ -32,6 +32,14 @@ export const en: Record<I18nKey, string> = {
   "auth.deleteAsk": "Delete your account forever? This cannot be undone.",
   "auth.logoutUnsynced":
     "No cloud connection at sign-out: your latest changes are stored only on this device. They will upload next time you sign in here.",
+  "auth.invalidCredentials": "Incorrect email or password.",
+  "auth.emailTaken": "That email is already registered.",
+  "auth.cloudAccount":
+    "That account signs in with Supabase: check your confirmation email or use a local account.",
+  "auth.emailConflict":
+    "That email belongs to a local account: sign in with your local password or use another email.",
+  "auth.cloudUnavailable": "The cloud is not responding; try again.",
+  "auth.invalidToken": "The session expired; sign in again.",
   "common.loading": "Loading…",
   "common.done": "Got it",
   "common.search": "Search…",

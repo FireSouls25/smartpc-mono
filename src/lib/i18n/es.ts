@@ -32,6 +32,14 @@ export const es = {
     "¿Eliminar tu cuenta para siempre? Esta acción no se puede deshacer.",
   "auth.logoutUnsynced":
     "Al salir no había conexión con la nube: tus últimos cambios quedaron guardados solo en este equipo. Se subirán la próxima vez que inicies sesión aquí.",
+  "auth.invalidCredentials": "Correo o contraseña incorrectos.",
+  "auth.emailTaken": "Ese correo ya está registrado.",
+  "auth.cloudAccount":
+    "Esa cuenta entra con Supabase: revisa tu correo de confirmación o usa una cuenta local.",
+  "auth.emailConflict":
+    "Ese correo ya lo usa una cuenta local: entra con tu contraseña local o usa otro correo.",
+  "auth.cloudUnavailable": "La nube no responde; inténtalo de nuevo.",
+  "auth.invalidToken": "La sesión caducó; entra de nuevo.",
   "common.loading": "Cargando…",
   "common.done": "Entendido",
   "common.search": "Buscar…",
