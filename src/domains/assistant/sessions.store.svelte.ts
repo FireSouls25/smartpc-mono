@@ -19,6 +19,10 @@ async function refreshSessions(): Promise<void> {
   }
 }
 
+function clearList(): void {
+  list = [];
+}
+
 function removeFromList(id: string): void {
   list = list.filter((s) => s.id !== id);
 }
@@ -51,6 +55,7 @@ export const sessionStore = {
     return sessionCombo;
   },
   refreshSessions,
+  clearList,
   removeFromList,
   setActive,
   clearActive,

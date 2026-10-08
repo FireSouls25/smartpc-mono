@@ -1,4 +1,19 @@
 import { authApi, type User } from "./auth.api";
+import { chatStore } from "../assistant/chat.store.svelte";
+import { sessionStore } from "../assistant/sessions.store.svelte";
+
+/**
+ * Account switch hygiene: conversation state is per-user (the sidecar
+ * scopes every session row by uid), but these stores are module-level
+ * and outlive logout/login. Without a reset, the next send/open reuses
+ * the previous account's session id under the new uid and the sidecar
+ * correctly answers 404 `session not found`. Acyclic: neither store
+ * imports auth back (chat drives sessions/providers only).
+ */
+function resetConversation(): void {
+  chatStore.newChat();
+  sessionStore.clearList();
+}
 
 const REFRESH_KEY = "smartpc.refresh";
 
@@ -97,6 +112,7 @@ async function login(email: string, password: string): Promise<void> {
   // (Single-account devices are the norm; the flag is approximate by design.
   // See logoutWarning below.)
   clearLogoutWarning();
+  resetConversation();
 }
 
 async function register(
@@ -150,6 +166,7 @@ async function logout(): Promise<void> {
   user = null;
   accessToken = null;
   await writeRefresh(null);
+  resetConversation();
 }
 
 async function deleteAccount(): Promise<void> {
@@ -158,6 +175,7 @@ async function deleteAccount(): Promise<void> {
   user = null;
   accessToken = null;
   await writeRefresh(null);
+  resetConversation();
   clearLogoutWarning();
 }
 
