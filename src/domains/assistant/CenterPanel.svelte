@@ -192,6 +192,7 @@
           <div class="msg-in flex justify-start">
             <div class="flex w-full flex-col gap-1">
               <div class="reply-text">
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
                 {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
               </div>
               {#if m.steps?.length}
