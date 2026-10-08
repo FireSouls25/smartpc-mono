@@ -183,7 +183,7 @@
       {#each chat.messages as m, i (m.id ?? `local-${i}`)}
         {#if m.role === "user"}
           <div class="msg-in flex justify-end">
-            <div class="flex max-w-[85%] flex-col items-end gap-1">
+            <div class="flex max-w-[95%] flex-col items-end gap-1">
               <p class="bubble-user">{m.text}</p>
             </div>
           </div>
