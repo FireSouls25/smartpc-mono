@@ -498,11 +498,11 @@ describe("sidecar contract", () => {
     expect(goneAgainBody.removed).toBe(false);
   });
 
-  test("T4 control: protocol is 4 (single bump for the union)", async () => {
-    expect(SIDECAR_PROTOCOL).toBe(4);
+  test("protocol is 5 (v5: TTS voice uninstall + real install state)", async () => {
+    expect(SIDECAR_PROTOCOL).toBe(5);
     const res = await fetch(`${BASE}/health`);
     const body = (await res.json()) as { protocol: number };
-    expect(body.protocol).toBe(4);
+    expect(body.protocol).toBe(5);
   });
 
   test("T4 control: catalog carries mouse/key tools + honest type_text", async () => {
@@ -761,6 +761,7 @@ describe("sidecar contract", () => {
         id: string;
         lang: string;
         label: string;
+        gender: string;
         size_mb: number;
         quality: string;
       }[];
@@ -773,20 +774,52 @@ describe("sidecar contract", () => {
     // way the shape holds and defaults stay advertised.
     for (const m of body.models) {
       // A2 takes these ids over as synth ids: the prefix is the contract.
-      expect(m.id.startsWith("piper-") || m.id.startsWith("kitten-")).toBe(
-        true,
-      );
+      expect(
+        m.id.startsWith("piper-") ||
+          m.id.startsWith("kitten-") ||
+          m.id.startsWith("kokoro-"),
+      ).toBe(true);
       expect(typeof m.lang).toBe("string");
       expect(typeof m.label).toBe("string");
       expect(typeof m.size_mb).toBe("number");
       expect(typeof m.quality).toBe("string");
+      expect(m.gender === "male" || m.gender === "female").toBe(true);
     }
+    // English: 2 masculine + 2 feminine (Kitten sids, one 25 MB model).
+    const en = body.models.filter((m) => m.lang === "en");
+    expect(en.filter((m) => m.gender === "male").length).toBe(2);
+    expect(en.filter((m) => m.gender === "female").length).toBe(2);
+    // Spanish is Davefx alone: the Kokoro es sids were removed (their
+    // model produces NaN samples; neither v1_1 nor fp32 v1_0 has es).
+    const es = body.models.filter((m) => m.lang === "es");
+    expect(es.filter((m) => m.gender === "male").length).toBe(1);
+    expect(es.filter((m) => m.gender === "female").length).toBe(0);
     expect(typeof body.default_for_lang).toBe("object");
     expect(body.default_for_lang["es"]).toContain("piper-");
     expect(body.default_for_lang["en"]).toBeDefined();
     // Sidecar stays stateless per call: no active voice server-side.
     expect(body.active).toBeNull();
     expect(typeof body.ready).toBe("object");
+  });
+
+  test("TTS voice uninstall is idempotent + validates ids", async () => {
+    // Unknown catalog ids 400 (mirrors speak validation).
+    const bad = await fetch(
+      `${BASE}/v1/voice/tts-models/${encodeURIComponent("nope")}`,
+      { method: "DELETE", headers: gate },
+    );
+    expect(bad.status).toBe(400);
+    const badBody = (await bad.json()) as { error: { code: string } };
+    expect(badBody.error.code).toBe("invalid_voice");
+    // Known-but-absent model: ok, removed=false, never an error.
+    const res = await fetch(
+      `${BASE}/v1/voice/tts-models/${encodeURIComponent("kitten-nano-en-v0_2#1")}`,
+      { method: "DELETE", headers: gate },
+    );
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as { ok: boolean; removed: boolean };
+    expect(body.ok).toBe(true);
+    expect(typeof body.removed).toBe("boolean");
   });
 
   test("T3 voice: speak rejects an unknown voice before any spawn", async () => {

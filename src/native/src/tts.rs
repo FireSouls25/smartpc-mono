@@ -106,8 +106,15 @@ impl TtsManager {
         text: &str,
         lang: &str,
         voice: Option<&str>,
-    ) -> Result<(u64, &'static str), TtsError> {
-        let model = resolve_tts_model(lang, voice).map_err(TtsError::InvalidVoice)?;
+    ) -> Result<(u64, String), TtsError> {
+        let (model, sid) = resolve_tts_model(lang, voice).map_err(TtsError::InvalidVoice)?;
+        // Echo the composite voice id (what the catalog and the client know),
+        // not the bare model: sid variants share one model id.
+        let voice_id = voice
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| tts_model_for_lang(lang))
+            .to_string();
         let clean: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if clean.is_empty() {
             return Err(TtsError::Failed("nothing to speak".to_string()));
@@ -130,7 +137,7 @@ impl TtsManager {
             clean.chars().count()
         ));
         let home = self.data_dir.join("pi").join("tts-home");
-        write_tts_config(&home, lang, model)?;
+        write_tts_config(&home, lang, model, sid)?;
         let (bin, mut args) = crate::pi::supervisor::PiSupervisor::pi_command();
         args.extend([
             "--mode".to_string(),
@@ -248,13 +255,50 @@ impl TtsManager {
                 crate::diagnostics::push("tts: player reaped by watchdog".to_string());
             }
         });
-        Ok((estimated, model))
+        Ok((estimated, voice_id))
     }
 
     /// False when the pi-listen voice extension is missing (TTS catalog
     /// reads empty; speaks fail loudly as misconfigured).
     pub fn engine_present(&self) -> bool {
         self.voice_ext.is_file()
+    }
+
+    /// pi-listen model cache under the isolated TTS home
+    /// (`<tts-home>/.pi/models/tts/<model>/`). Presence of `tokens.txt`
+    /// is the install marker (mirrors pi-listen's `isTtsModelInstalled`;
+    /// every slot ships it at the archive root). Sid entries share one
+    /// model dir, so all their `ready` flags flip together.
+    pub fn models_dir(&self) -> PathBuf {
+        self.data_dir
+            .join("pi")
+            .join("tts-home")
+            .join(".pi")
+            .join("models")
+            .join("tts")
+    }
+
+    pub fn model_installed(&self, model: &str) -> bool {
+        self.models_dir().join(model).join("tokens.txt").is_file()
+    }
+
+    /// Uninstall a voice model (stops playback first — never delete audio
+    /// out from under a live player). Idempotent: a missing dir still
+    /// answers `Ok(false)`; unknown catalog ids are `Err` (400 upstream).
+    pub fn remove_model(&self, voice_id: &str) -> Result<bool, String> {
+        let entry = TTS_CATALOG
+            .iter()
+            .find(|v| v.id == voice_id)
+            .ok_or_else(|| format!("unknown tts voice: {voice_id}"))?;
+        let (model, _) = split_voice_id(entry.id)?;
+        self.stop();
+        let dir = self.models_dir().join(model);
+        if !dir.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(&dir)
+            .map(|_| true)
+            .map_err(|e| format!("uninstall {voice_id}: {e}"))
     }
 
     /// Cut active speech immediately. Idempotent.
@@ -319,38 +363,105 @@ pub fn resolve_voice_ext() -> std::path::PathBuf {
 }
 
 /// TTS voice catalog (A1 read-only: no DELETE endpoint). Piper MIT
-/// voices where available (~60 MB first download); kitten-nano default
-/// for English. Sizes are approximate (Settings display only).
+/// voices where available (~60 MB first download); kitten-nano sids for
+/// English (25 MB shared model, 4 gender-labeled voices). Sizes are
+/// approximate (Settings display only).
+///
+/// Voice ids are pi-listen model ids, optionally suffixed with `#<sid>`
+/// for multi-voice models (Kitten Nano has 8 sids, Kokoro up to 11 — the
+/// sid rides `ttsLocalVoiceId` in the isolated pi config). Plain ids mean
+/// the model's default sid.
 #[derive(Debug, Clone, Copy)]
 pub struct TtsVoice {
     pub id: &'static str,
     pub lang: &'static str,
     pub label: &'static str,
+    pub gender: &'static str,
     pub size_mb: u64,
     pub quality: &'static str,
 }
 
+// NOTE (operator decision): only es + en are offered — the UI supports
+// exactly those two languages, so the other Piper rows were removed.
+// The `#sid` machinery stays (Kitten/Kokoro sids), as does `gender`.
 pub const TTS_CATALOG: &[TtsVoice] = &[
-    TtsVoice { id: "piper-es_ES-davefx-medium-int8", lang: "es", label: "Español (Davefx)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "piper-fr_FR-siwis-medium-int8", lang: "fr", label: "Français (Siwis)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "piper-de_DE-thorsten-medium-int8", lang: "de", label: "Deutsch (Thorsten)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "piper-it_IT-paola-medium-int8", lang: "it", label: "Italiano (Paola)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "piper-pt_BR-cadu-medium-int8", lang: "pt", label: "Português (Cadu)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "piper-hi_IN-pratham-medium-int8", lang: "hi", label: "हिन्दी (Pratham)", size_mb: 63, quality: "medium" },
-    TtsVoice { id: "kitten-nano-en-v0_2", lang: "en", label: "English (Kitten nano)", size_mb: 40, quality: "nano" },
+    TtsVoice {
+        id: "piper-es_ES-davefx-medium-int8",
+        lang: "es",
+        label: "Español (Davefx)",
+        gender: "male",
+        size_mb: 63,
+        quality: "medium",
+    },
+    // NOTE (es gap): pi-listen ships only Davefx for Spanish, and the two
+    // Kokoro es voices (Álex/Dora, kokoro-int8-multi-lang-v1_0 sids 31/28)
+    // were removed: that model produces NaN samples on most voices and
+    // pi-listen itself refuses it (use v1_1 or en-v0_19 — neither has es
+    // voices; fp32 v1_0 neither). A 2nd es voice needs an upstream model.
+    TtsVoice {
+        id: "kitten-nano-en-v0_2#0",
+        lang: "en",
+        label: "English (Kitten M1)",
+        gender: "male",
+        size_mb: 25,
+        quality: "nano",
+    },
+    TtsVoice {
+        id: "kitten-nano-en-v0_2#2",
+        lang: "en",
+        label: "English (Kitten M2)",
+        gender: "male",
+        size_mb: 25,
+        quality: "nano",
+    },
+    TtsVoice {
+        id: "kitten-nano-en-v0_2#1",
+        lang: "en",
+        label: "English (Kitten F1)",
+        gender: "female",
+        size_mb: 25,
+        quality: "nano",
+    },
+    TtsVoice {
+        id: "kitten-nano-en-v0_2#3",
+        lang: "en",
+        label: "English (Kitten F2)",
+        gender: "female",
+        size_mb: 25,
+        quality: "nano",
+    },
 ];
+
+/// Split a catalog voice id into (pi-listen model id, optional sid).
+/// Only `#`-suffixed catalog entries carry a sid; a hand-typed id must
+/// match a catalog entry whole, so it can never address an unintended
+/// speaker through a crafted suffix.
+fn split_voice_id(id: &'static str) -> Result<(&'static str, Option<u32>), String> {
+    match id.split_once('#') {
+        None => Ok((id, None)),
+        Some((model, sid)) => sid
+            .parse::<u32>()
+            .map(|n| (model, Some(n)))
+            .map_err(|_| format!("bad tts voice sid in: {id}")),
+    }
+}
 
 /// Resolve the model for a speak call: an explicit `voice` must be a
 /// catalog id (unknown → Err for the 400 `invalid_voice`); omitted/blank
-/// falls back to the per-language default below.
-pub fn resolve_tts_model(lang: &str, voice: Option<&str>) -> Result<&'static str, String> {
+/// falls back to the per-language default below. Returns the pi-listen
+/// model id plus the speaker sid (None = model default).
+pub fn resolve_tts_model(
+    lang: &str,
+    voice: Option<&str>,
+) -> Result<(&'static str, Option<u32>), String> {
     match voice.map(str::trim).filter(|v| !v.is_empty()) {
         Some(id) => TTS_CATALOG
             .iter()
             .find(|v| v.id == id)
-            .map(|v| v.id)
+            .map(|v| split_voice_id(v.id))
+            .transpose()?
             .ok_or_else(|| format!("unknown tts voice: {id}")),
-        None => Ok(tts_model_for_lang(lang)),
+        None => split_voice_id(tts_model_for_lang(lang)),
     }
 }
 
@@ -363,27 +474,34 @@ pub fn resolve_tts_model(lang: &str, voice: Option<&str>) -> Result<&'static str
 pub fn tts_model_for_lang(lang: &str) -> &'static str {
     match lang {
         "es" => "piper-es_ES-davefx-medium-int8",
-        "fr" => "piper-fr_FR-siwis-medium-int8",
-        "de" => "piper-de_DE-thorsten-medium-int8",
-        "it" => "piper-it_IT-paola-medium-int8",
-        "pt" => "piper-pt_BR-cadu-medium-int8",
-        "hi" => "piper-hi_IN-pratham-medium-int8",
-        _ => "kitten-nano-en-v0_2",
+        // Composite default: Kitten M1 (sid 0 = model default voice).
+        // Only es + en are offered (operator decision); every other UI
+        // language falls back to the English default.
+        _ => "kitten-nano-en-v0_2#0",
     }
 }
 
 /// Isolated pi-listen config (never touches the user's real pi setup).
-fn write_tts_config(home: &PathBuf, lang: &str, model: &str) -> Result<(), String> {
+fn write_tts_config(
+    home: &PathBuf,
+    lang: &str,
+    model: &str,
+    sid: Option<u32>,
+) -> Result<(), String> {
     let dir = home.join(".pi").join("agent");
     std::fs::create_dir_all(&dir).map_err(|e| format!("tts home: {e}"))?;
-    let body = serde_json::json!({
-        "voice": {
-            "ttsEnabled": true,
-            "ttsBackend": "local",
-            "language": lang,
-            "ttsLocalModel": model,
-        }
+    let mut voice = serde_json::json!({
+        "ttsEnabled": true,
+        "ttsBackend": "local",
+        "language": lang,
+        "ttsLocalModel": model,
     });
+    // Multi-voice models (Kitten sids, Kokoro speakers): pi-listen reads
+    // the numeric speaker id from `ttsLocalVoiceId`. Absent = model default.
+    if let Some(n) = sid {
+        voice["ttsLocalVoiceId"] = serde_json::json!(n);
+    }
+    let body = serde_json::json!({ "voice": voice });
     std::fs::write(
         dir.join("settings.json"),
         serde_json::to_string_pretty(&body).unwrap_or_default(),
@@ -412,34 +530,74 @@ mod tests {
         // A2 takes these ids over as synth ids: the prefix is the contract.
         assert!(!TTS_CATALOG.is_empty());
         for v in TTS_CATALOG {
+            let base = v.id.split('#').next().unwrap_or(v.id);
             assert!(
-                v.id.starts_with("piper-") || v.id.starts_with("kitten-"),
+                base.starts_with("piper-")
+                    || base.starts_with("kitten-")
+                    || base.starts_with("kokoro-"),
                 "bad catalog id: {}",
                 v.id
             );
             assert!(v.size_mb > 0);
             assert!(!v.label.is_empty());
+            assert!(
+                v.gender == "male" || v.gender == "female",
+                "voice without gender: {}",
+                v.id
+            );
         }
     }
 
     #[test]
+    fn english_has_two_masculine_two_feminine_spanish_davefx_only() {
+        let count = |lang: &str, gender: &str| {
+            TTS_CATALOG
+                .iter()
+                .filter(|v| v.lang == lang && v.gender == gender)
+                .count()
+        };
+        assert_eq!(count("en", "male"), 2);
+        assert_eq!(count("en", "female"), 2);
+        // Spanish is Davefx alone: the Kokoro es sids were removed (their
+        // model produces NaN samples; neither v1_1 nor fp32 v1_0 has es).
+        assert_eq!(count("es", "male"), 1);
+        assert_eq!(count("es", "female"), 0);
+    }
+
+    #[test]
     fn resolve_voice_param() {
-        // Explicit id wins over the language default.
+        // Explicit id wins over the language default (model + sid split).
         assert_eq!(
-            resolve_tts_model("es", Some("kitten-nano-en-v0_2")),
-            Ok("kitten-nano-en-v0_2")
+            resolve_tts_model("es", Some("kitten-nano-en-v0_2#1")),
+            Ok(("kitten-nano-en-v0_2", Some(1)))
+        );
+        assert_eq!(
+            resolve_tts_model("es", Some("kokoro-int8-multi-lang-v1_0#28")),
+            Ok(("kokoro-int8-multi-lang-v1_0", Some(28)))
+        );
+        // Plain model ids mean the model default sid.
+        assert_eq!(
+            resolve_tts_model("es", Some("piper-es_ES-davefx-medium-int8")),
+            Ok(("piper-es_ES-davefx-medium-int8", None))
         );
         // Blank behaves as omitted (sidecar stays stateless per-call).
         assert_eq!(
             resolve_tts_model("es", Some("  ")),
-            Ok("piper-es_ES-davefx-medium-int8")
+            Ok(("piper-es_ES-davefx-medium-int8", None))
         );
         assert_eq!(
             resolve_tts_model("es", None),
-            Ok("piper-es_ES-davefx-medium-int8")
+            Ok(("piper-es_ES-davefx-medium-int8", None))
+        );
+        assert_eq!(
+            resolve_tts_model("en", None),
+            Ok(("kitten-nano-en-v0_2", Some(0)))
         );
         // Unknown → Err (the route maps this to 400 invalid_voice).
         assert!(resolve_tts_model("es", Some("nope")).is_err());
+        // Sid only valid via a whole catalog id: crafted suffixes fail.
+        assert!(resolve_tts_model("en", Some("kitten-nano-en-v0_2#9")).is_err());
+        assert!(resolve_tts_model("en", Some("kitten-nano-en-v0_2#x")).is_err());
     }
 
     #[test]
@@ -456,9 +614,33 @@ mod tests {
         // piper- prefix required: bare Piper names are unknown to pi-listen
         // (see tts_model_for_lang docs for how this broke Spanish TTS).
         assert_eq!(tts_model_for_lang("es"), "piper-es_ES-davefx-medium-int8");
-        assert_eq!(tts_model_for_lang("en"), "kitten-nano-en-v0_2");
-        assert_eq!(tts_model_for_lang("fr"), "piper-fr_FR-siwis-medium-int8");
-        // Unknown falls back to the English default (documented).
-        assert_eq!(tts_model_for_lang("xx"), "kitten-nano-en-v0_2");
+        assert_eq!(tts_model_for_lang("en"), "kitten-nano-en-v0_2#0");
+        // Only es + en are offered: everything else falls back to English.
+        assert_eq!(tts_model_for_lang("fr"), "kitten-nano-en-v0_2#0");
+        assert_eq!(tts_model_for_lang("xx"), "kitten-nano-en-v0_2#0");
+    }
+
+    #[test]
+    fn install_marker_and_uninstall_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("smartpc-tts-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mgr = TtsManager::new(
+            dir.clone(),
+            PathBuf::from("/nonexistent-voice-ext-xyz/voice.ts"),
+        );
+        // tokens.txt presence is the marker (mirrors pi-listen).
+        assert!(!mgr.model_installed("kitten-nano-en-v0_2"));
+        let model_dir = mgr.models_dir().join("kitten-nano-en-v0_2");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        assert!(!mgr.model_installed("kitten-nano-en-v0_2"));
+        std::fs::write(model_dir.join("tokens.txt"), b"x").unwrap();
+        assert!(mgr.model_installed("kitten-nano-en-v0_2"));
+        // Uninstall by sid id removes the shared model dir (idempotent).
+        assert!(mgr.remove_model("kitten-nano-en-v0_2#1").unwrap());
+        assert!(!mgr.model_installed("kitten-nano-en-v0_2"));
+        assert!(!mgr.remove_model("kitten-nano-en-v0_2#1").unwrap());
+        // Unknown catalog ids are Err (the route maps this to 400).
+        assert!(mgr.remove_model("nope").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
