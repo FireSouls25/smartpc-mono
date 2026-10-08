@@ -24,7 +24,18 @@ export type VoiceEvent =
   | { seq: number; epoch: number; type: "wake"; word: string }
   | { seq: number; epoch: number; type: "transcript"; text: string }
   | { seq: number; epoch: number; type: "error"; code: string; message: string }
-  | { seq: number; epoch: number; type: "end" };
+  | { seq: number; epoch: number; type: "end" }
+  // A2 owned playback: Rodio Sink completion is real. Global event (not a
+  // listen session) — the poll loop applies it regardless of epoch.
+  | {
+      seq: number;
+      epoch: number;
+      type: "speaking";
+      active: boolean;
+      chunk: number;
+      chunks: number;
+      model: string;
+    };
 
 export interface TtsModel {
   id: string;
@@ -34,6 +45,8 @@ export interface TtsModel {
   gender: string;
   size_mb: number;
   quality: string;
+  /** A2 per-voice download URL (absent on older sidecars — optional). */
+  url?: string;
 }
 
 export interface TtsModelsResponse {
@@ -76,10 +89,14 @@ export const voiceApi = {
     ),
 
   /**
-   * Speak text aloud (fire-and-forget server-side with a watchdog).
-   * Per-chunk call: the store splits long replies and paces chunks by
-   * each authoritative `estimated_ms`. `voice` is a catalog id from
+   * Speak text aloud (queued server-side on the Rodio Sink; completion
+   * arrives as `speaking{active,chunk,chunks}` poll events). Per-chunk
+   * call: the store splits long replies and posts each chunk, which the
+   * server synthesizes and queues in order. `voice` is a catalog id from
    * `ttsModels` (unknown → 400 `invalid_voice`); omit for the default.
+   * `estimated_ms` stays as the client fallback budget (engines without
+   * speaking events). First-use model download rides this call (180 s
+   * budget on the explicit download/test-play callers).
    */
   speak: (
     text: string,

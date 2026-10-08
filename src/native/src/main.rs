@@ -15,6 +15,7 @@ mod cloud;
 mod diagnostics;
 mod harness;
 mod pi;
+mod playback;
 mod platform;
 mod secrets;
 mod stt;

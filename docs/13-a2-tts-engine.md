@@ -7,6 +7,7 @@ stays an npm library (its engine), never a runtime child for TTS.
 ## Proven recipe (do not redesign — implement this)
 
 Upstream Piper voices (rhasspy/piper-voices) load in sherpa vits iff:
+
 1. `.onnx` + `.onnx.json` downloaded (json = value source only).
 2. ONNX metadata appended (protobuf field 14 entries): `sample_rate`
    (json `audio.sample_rate`), `n_speakers` (json `num_speakers`),
@@ -16,8 +17,8 @@ Upstream Piper voices (rhasspy/piper-voices) load in sherpa vits iff:
 3. Shared `tokens.txt` (espeak phone table — copy once) + shared
    `espeak-ng-data/` (copy once) alongside every voice.
 4. `sid` per `speaker_id_map` (sharvard M:0/F:1; single-speaker: 0).
-Proven live: Davefx (native metadata), Sharvard sid 0+1 (patched),
-Daniela sid 0 (patched) — all healthy RMS, ~200–1200 ms synth.
+   Proven live: Davefx (native metadata), Sharvard sid 0+1 (patched),
+   Daniela sid 0 (patched) — all healthy RMS, ~200–1200 ms synth.
 
 ## Voice table (final)
 
@@ -48,7 +49,7 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► node tts-synth.j
   sidecar drop + `speak-stop` kills playback only (daemon persists).
 - **Rust** (`tts.rs` rewrite + new `playback.rs`): `speak()` =
   resolve → daemon ensure (first-use download, client 180 s budget) →
-  daemon synth per chunk → Rodio `Sink` queue → real end events.
+  daemon synth per chunk → cpal-direct queue → real end events.
   `TtsManager` keeps its method shapes; internals swap child-spawn for
   daemon+Sink. Watchdog stays as backup only (log, don't reap live audio).
   `write_tts_config` + isolated pi home: DELETED (nothing configures pi).
@@ -58,8 +59,13 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► node tts-synth.j
 - **Cache**: `<tts-home>/.pi/models/tts/<our-id>/`
   (`model.onnx`, `model.onnx.json`, `tokens.txt`, `espeak-ng-data/`);
   `_shared/` holds one canonical tokens.txt + espeak-ng-data, copied per
-  voice at ensure time (copies, not symlinks — Windows-safe). Existing
-  davefx/kitten caches are reused as-is (davefx seeds `_shared`).
+  voice at ensure time (copies, not symlinks — Windows-safe). `tokens.txt`
+  is ALWAYS the embedded Piper/espeak table (never kitten's — different
+  phone inventory, crashes vits synthesis with native out_of_range);
+  espeak-ng-data comes from the kitten tarball (structurally identical
+  set, verified). Existing davefx/kitten caches are reused as-is
+  (davefx seeds `_shared`); on fresh installs the daemon seeds `_shared`
+  from the kitten tarball (one 25 MB download serving seeds + en model).
   DELETE removes the voice dir (shared stays). `ready` = model.onnx present.
 - **Catalog** (`TTS_CATALOG`): sharvard×2 (`upstream-piper-es-sharvard#0/1`,
   76 MB shared note), daniela×1 (`upstream-piper-es-daniela`, 114 MB),
@@ -83,8 +89,9 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► node tts-synth.j
 
 ## New deps (final)
 
-- Rust: `rodio 0.20` ONLY (cpal backend; ALSA already required — zero new
-  system libs on any OS). No onnxruntime/espeak crates (sherpa prebuilt
+- Rust: NONE (D1 — the `rodio 0.20` pin died at resolution: cpal 0.15 /
+  alsa 0.9 vs the mic's cpal 0.18 / alsa 0.11; playback is cpal-direct
+  over our own WAVs). No onnxruntime/espeak crates (sherpa prebuilt
   covers it — this is the whole point).
 - Node: none (sherpa-onnx-node already vendored).
 - System: none new (Linux: cmake/C++/ALSA as today; espeak-ng NEVER needed
@@ -93,21 +100,23 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► node tts-synth.j
 ## Per-OS notes (from the portability analysis)
 
 - Linux (all distros, X11+Wayland — audio is display-agnostic): no change.
-- macOS: spawner sets DYLD_LIBRARY_PATH for the daemon; Rodio CoreAudio.
-- Windows: no DYLD/LD games needed (DLLs beside the binding); Rodio WASAPI.
+- macOS: spawner sets DYLD_LIBRARY_PATH for the daemon; cpal CoreAudio.
+- Windows: no DYLD/LD games needed (DLLs beside the binding); cpal WASAPI.
 - Packaged builds: `extraResources` must include `pi-bridge/tts-synth.js`
-  + `sherpa-onnx-node` + the `sherpa-onnx-<plat>-<arch>` dir + node
-  runtime presence (document; Electron `main.cjs` spawns daemon via the
-  sidecar, which already knows node). pi-listen removal from the TTS path
-  is a follow-up (STT never used it; agent harness still needs pi-bridge).
+  - `sherpa-onnx-node` + the `sherpa-onnx-<plat>-<arch>` dir + node
+    runtime presence (document; Electron `main.cjs` spawns daemon via the
+    sidecar, which already knows node). pi-listen removal from the TTS path
+    is a follow-up (STT never used it; agent harness still needs pi-bridge).
 
 ## Tests (normative)
 
 - Node: metadata-patch unit (protobuf append → parse back keys), recipe
-  order test (values derived from a fixture .onnx.json).
+  order test (values derived from a fixture .onnx.json), kitten tarball
+  URL pin, scope guards, extract-root discovery, embedded phone-table
+  shape (152 dense lines), protocol framing incl. the id-correlation fix.
 - Rust: catalog gender counts (es 2M+2F, en 2M+2F), resolve sid mapping,
   daemon protocol framing (LF + `\r` strip, id correlation), playback
-  queue math — all headless (no audio device: Rodio `Sink` tests gate
+  queue math — all headless (no audio device: cpal-stream tests gate
   stream creation behind `SMARTPC_AUDIO_LIVE=1`, default asserts queue
   math + event sequence only).
 - Contract: catalog ids/entries (sharvard/daniela/kitten/davefx, gender),
@@ -125,4 +134,4 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► node tts-synth.j
 - sherpa-onnx-node major upgrades (pin 1.13.x; helper asserts slot API).
 - Daemon crash mid-queue → Rust respawns once, else fails the turn loudly.
 - 190 MB opt-in downloads (sharvard 76 + daniela 114) — per-row buttons
-  + sizes already disclose; no prefetch.
+  - sizes already disclose; no prefetch.

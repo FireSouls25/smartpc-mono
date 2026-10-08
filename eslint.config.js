@@ -41,4 +41,12 @@ export default [
       "@typescript-eslint/no-require-imports": "off",
     },
   },
+  {
+    // The TTS synth daemon (+ its tests) runs as plain node scripts
+    // spawned directly by the sidecar — no bundler, so require() stays.
+    files: ["pi-bridge/tts-synth.js", "pi-bridge/tts-synth.test.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 ];

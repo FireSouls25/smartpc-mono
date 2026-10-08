@@ -296,16 +296,16 @@ containing `refused javascript:` is the T2 gate test.
 ## 8. Residual risks / deferred
 
 - Confirmation renderer surface (dialog UI + `GET /internal/ui/
-  confirmations` push) is designed (T2 §5) but unscheduled — until then
+confirmations` push) is designed (T2 §5) but unscheduled — until then
   Medium/High fail closed when gated.
 - A2 rodio takeover, TTS DELETE endpoint, whole-history audit export,
   per-tool toggle granularity, toggle `expires_at` — deferred, recorded.
 - `http:` URLs always confirm even post-P0 (P1 adopted); punycode display
   hardening stays an open renderer concern (T2 Q3).
 
-*Track artifacts: `design/t1-grounding.md`, `t2-open-policy.md`,
+_Track artifacts: `design/t1-grounding.md`, `t2-open-policy.md`,
 `t3-voice.md`, `t4-control.md`, `verify-contracts.md`, `verify-safety.md`
 (run 5eb76436). Verifier B1–B5 all resolved above; safety BLOCK lifted by the
 adopted P0 fixes. Deviation from locked decision 1 (open_url Medium+gated,
 private-host refusal, query-stripping) is flagged for operator confirm in the
-delivery report.*
+delivery report._

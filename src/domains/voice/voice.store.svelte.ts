@@ -138,8 +138,10 @@ let wakeWord = $state<string>(loadWake());
 let device = $state<string | null>(loadDevice());
 let error = $state("");
 // TTS output: auto-read replies aloud when enabled. `speaking` is
-// optimistic (the server gives no completion events by design); the timer
-// mirrors the server watchdog so the UI recovers even if audio overruns.
+// event-driven (A2 `speaking{active,chunk,chunks}` events via the poll
+// loop); the pump sets it at queue start so the stop affordance appears
+// at once, and the inactive event (or the summed-estimate fallback in
+// waitForSpeakIdle) clears it. `speakSeq` drops stale/replayed events.
 let speakEnabled = $state<boolean>(loadSpeak());
 let sensitivity = $state<VoiceSensitivity>(loadSensitivity());
 let sttModel = $state<string>(loadSttModel());
@@ -151,6 +153,8 @@ let speaking = $state(false);
 let speakGen = 0;
 let speakChunkIndex = $state(0);
 let speakChunkCount = $state(0);
+/** Last applied speaking-event seq (stale/replay drop, see below). */
+let speakSeq = 0;
 let ttsVoice = $state<string>(loadTtsVoice());
 let ttsTesting = $state(false);
 /** Catalog id currently downloading via `downloadTtsVoice` (null = none).
@@ -237,10 +241,10 @@ async function pollLoop(my: number, epoch: number): Promise<void> {
     cursor = batch.next;
     for (const ev of batch.events) {
       if (my !== run) return;
-      // The queue is global across sessions: drop anything that isn't ours
-      // (a previous session's Transcript/End replayed here used to kill the
-      // new poll loop and orphan a live session → permanent 409s).
-      if (ev.epoch !== epoch) continue;
+      // Speaking events are global (TTS playback, not a listen
+      // session): apply them regardless of epoch. Everything else stays
+      // session-scoped (stale-session replay used to kill live loops).
+      if (ev.type !== "speaking" && ev.epoch !== epoch) continue;
       await handle(ev);
     }
   }
@@ -291,6 +295,11 @@ async function handle(ev: VoiceEvent): Promise<void> {
           scheduleNextTurn();
         }
       }
+      break;
+    case "speaking":
+      // A2 event-driven speech: exact highlight + real end (replaces the
+      // optimistic timer). Global event — never epoch-filtered (see loop).
+      applySpeakingEvent(ev);
       break;
   }
 }
@@ -570,10 +579,86 @@ function ensureReplySub(): void {
 ensureReplySub();
 
 /**
+ * Apply one `speaking{active,chunk,chunks}` event (A2 owned playback).
+ * Stale/replayed events (seq at or below the last applied one) are
+ * dropped; every poll loop routes through here, so application is
+ * idempotent. Inactive clears the queue state and resumes conversation
+ * turn-taking (the speech "end").
+ */
+function applySpeakingEvent(
+  ev: Extract<VoiceEvent, { type: "speaking" }>,
+): void {
+  if (ev.seq <= speakSeq) return;
+  speakSeq = ev.seq;
+  if (ev.active) {
+    speaking = true;
+    // Server playback position is exact; the pump's queue length stands
+    // until the server reports a real count (0 = unknown, keep ours).
+    if (ev.chunks > 0) speakChunkCount = ev.chunks;
+    if (ev.chunk > 0) speakChunkIndex = ev.chunk;
+  } else {
+    speaking = false;
+    speakChunkIndex = 0;
+    speakChunkCount = 0;
+    // Conversation turn-taking: real speech end resumes the loop.
+    if (conversationActive) scheduleNextTurn();
+  }
+}
+
+/**
+ * Event-driven speech end: after the POST queue drains, playback
+ * continues server-side, so wait for `speaking{active:false}`. Any poll
+ * loop (listen or the follower below) applies it via
+ * applySpeakingEvent; the summed-estimate budget is the fallback so
+ * engines without speaking events still clear the UI. Never leaves the
+ * UI stuck speaking, never resumes conversation early.
+ */
+async function waitForSpeakIdle(my: number, budgetMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(budgetMs, 1000);
+  let cur = 0;
+  while (my === speakGen) {
+    // An inactive event already cleared state (and resumed conversation
+    // when due) — nothing left to do.
+    if (!speaking) return;
+    if (Date.now() >= deadline) break;
+    let batch;
+    try {
+      batch = await voiceApi.poll(cur);
+    } catch {
+      if (my !== speakGen) return;
+      // Transient (sidecar restart, blip): back off and keep waiting
+      // until the budget runs out (mirrors the listen poll loop).
+      await sleep(1000);
+      continue;
+    }
+    if (my !== speakGen) return;
+    cur = batch.next;
+    for (const ev of batch.events) {
+      if (my !== speakGen) return;
+      // Listen-session events belong to the listen loop; speaking is
+      // global, so only it is consumed here.
+      if (ev.type === "speaking") applySpeakingEvent(ev);
+    }
+  }
+  if (my !== speakGen) return;
+  if (speaking) {
+    // Fallback (no speaking events before the budget): clear
+    // optimistically so the UI never sticks, and keep turn-taking honest.
+    speaking = false;
+    speakChunkIndex = 0;
+    speakChunkCount = 0;
+    if (conversationActive) scheduleNextTurn();
+  }
+}
+
+/**
  * Read text aloud through the chunk queue (barge-in: cuts anything
  * playing). Detached `void` task — never blocks the turn. Each chunk is
- * a fresh server child (server barge-in semantics preserved); chunks are
- * paced by their authoritative `estimated_ms` (+2 s grace, 250 s cap).
+ * a fresh POST (server barge-in semantics preserved); the server queues
+ * them on its Rodio Sink, so no client pacing sleeps are needed — posts
+ * run back-to-back and playback order matches post order. Speaking state
+ * (active + chunk highlight) is event-driven via `speaking` events; the
+ * queue drain waits for the inactive event (summed-estimate fallback).
  * Failures: a bad chunk is skipped, a transport failure aborts the queue
  * (conversation → `speakFailed` + `stopAll`; manual → silent diagnostic).
  * Empty split → no POSTs.
@@ -592,9 +677,11 @@ async function speakText(text: string): Promise<void> {
   // (removed model, older sidecar) 400s every chunk. Drop the pref once,
   // fall back to the server default, and retry — never loop silently mute.
   let fellBack = false;
+  // Summed-estimate fallback budget for waitForSpeakIdle (engines
+  // without speaking events): per-chunk estimate + 2 s grace, 250 s cap.
+  let budgetMs = 0;
   for (let i = 0; i < chunks.length; i++) {
     if (my !== speakGen) return;
-    speakChunkIndex = i + 1;
     let estimated: number;
     try {
       const res = await voiceApi.speak(chunks[i], lang, voice);
@@ -609,9 +696,10 @@ async function speakText(text: string): Promise<void> {
         return;
       }
       // Authoritative per-chunk estimate; the local mirror (same
-      // formula as the server) is the fallback so the pacing never
+      // formula as the server) is the fallback so the budget never
       // collapses to zero on a bare-bones response.
       estimated = res.estimated_ms || estimateSpeakMs(chunks[i]);
+      budgetMs += Math.min(estimated + 2000, 250000);
     } catch (err) {
       if (my !== speakGen) return;
       if (
@@ -643,16 +731,12 @@ async function speakText(text: string): Promise<void> {
       return;
     }
     if (my !== speakGen) return;
-    // Pace by the authoritative estimate: the server gives no completion
-    // events, so the next chunk posts once this one should be done.
-    await sleep(Math.min(estimated + 2000, 250000));
   }
   if (my !== speakGen) return;
-  speakChunkIndex = 0;
-  speakChunkCount = 0;
-  speaking = false;
-  // Conversation turn-taking: queue drain is the speech "end".
-  if (conversationActive) scheduleNextTurn();
+  // Event-driven end: playback continues server-side after the queue
+  // drains; the `speaking{active:false}` event clears state (and resumes
+  // conversation). The summed-estimate fallback covers event-less engines.
+  await waitForSpeakIdle(my, budgetMs);
 }
 
 async function stopSpeaking(): Promise<void> {
@@ -821,4 +905,13 @@ export const voice = {
   downloadTtsVoice,
   setTtsVoice,
   reloadTtsVoice,
+};
+
+/**
+ * Unit-test hook (no production callers): drive A2 speaking events
+ * without a sidecar. Module state is fresh per `vi.resetModules()`
+ * import, so tests stay isolated.
+ */
+export const voiceTest = {
+  applySpeakingEvent,
 };

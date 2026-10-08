@@ -176,6 +176,36 @@ pub enum VoiceEvent {
     Transcript { text: String },
     Error { code: String, message: String },
     End {},
+    /// A2 owned playback position (spec docs/13-a2-tts-engine.md). A global
+    /// event, not a listen session: `chunk` is 1-based, `chunks` the
+    /// utterance total, `model` the composite catalog id. The poll loop
+    /// applies it regardless of epoch; `active:false` ends the turn.
+    Speaking {
+        active: bool,
+        chunk: usize,
+        chunks: usize,
+        model: String,
+    },
+}
+
+/// Global speaking-event sink: the TTS engine (`crate::tts`) has no handle
+/// on the `VoiceService` (it is built separately in `main`), so the service
+/// registers itself here on construction and the engine emits through
+/// [`emit_speaking`]. First construction wins; emission is infallible and
+/// thread-safe (the queue is mutex-guarded, notify is lock-free).
+static SPEAKING_SINK: std::sync::OnceLock<VoiceService> = std::sync::OnceLock::new();
+
+fn register_speaking_sink(service: &VoiceService) {
+    let _ = SPEAKING_SINK.set(service.clone());
+}
+
+/// Emit a `speaking{active,chunk,chunks,model}` event onto the shared
+/// `/v1/voice/events` queue (epoch 0: global, not a listen session).
+/// No-op when no voice service exists yet — never blocks, never fails.
+pub fn emit_speaking(active: bool, chunk: usize, chunks: usize, model: &str) {
+    if let Some(service) = SPEAKING_SINK.get() {
+        service.emit_speaking(active, chunk, chunks, model);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +239,7 @@ pub struct VoiceService {
 
 impl VoiceService {
     pub fn new(models_dir: std::path::PathBuf) -> Self {
-        Self {
+        let service = Self {
             inner: Arc::new(Mutex::new(Inner {
                 session: None,
                 events: VecDeque::with_capacity(64),
@@ -218,7 +248,24 @@ impl VoiceService {
             })),
             notify: Arc::new(Notify::new()),
             models_dir,
-        }
+        };
+        // A2 speaking-event sink (the TTS engine emits here globally).
+        register_speaking_sink(&service);
+        service
+    }
+
+    /// Push a `speaking{active,chunk,chunks,model}` event (A2 playback
+    /// position) onto this service's queue with epoch 0 (global event).
+    pub fn emit_speaking(&self, active: bool, chunk: usize, chunks: usize, model: &str) {
+        self.push_event(
+            0,
+            VoiceEvent::Speaking {
+                active,
+                chunk,
+                chunks,
+                model: model.to_string(),
+            },
+        );
     }
 
     /// Where whisper model files live (uninstall endpoint needs it).
@@ -535,6 +582,24 @@ mod tests {
         let (code, status, _) = StartError::AlreadyListening.http_parts();
         assert_eq!(code, 409);
         assert_eq!(status, "already_listening");
+    }
+
+    #[test]
+    fn speaking_event_serializes_to_the_a2_shape() {
+        // Contract with the renderer poll loop: tagged `speaking` with
+        // {active, chunk, chunks, model}; the poll envelope adds seq/epoch.
+        let v = serde_json::to_value(&VoiceEvent::Speaking {
+            active: true,
+            chunk: 2,
+            chunks: 3,
+            model: "upstream-piper-es-sharvard#0".to_string(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "speaking");
+        assert_eq!(v["active"], true);
+        assert_eq!(v["chunk"], 2);
+        assert_eq!(v["chunks"], 3);
+        assert_eq!(v["model"], "upstream-piper-es-sharvard#0");
     }
 
     #[test]

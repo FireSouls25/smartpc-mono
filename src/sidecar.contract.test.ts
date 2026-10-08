@@ -770,32 +770,36 @@ describe("sidecar contract", () => {
       ready: Record<string, boolean>;
     };
     expect(Array.isArray(body.models)).toBe(true);
-    // Empty models = engine missing (pi-bridge not installed here); either
-    // way the shape holds and defaults stay advertised.
+    // Empty models = engine missing (sherpa daemon not installed here);
+    // either way the shape holds and defaults stay advertised.
     for (const m of body.models) {
-      // A2 takes these ids over as synth ids: the prefix is the contract.
-      expect(
-        m.id.startsWith("piper-") ||
-          m.id.startsWith("kitten-") ||
-          m.id.startsWith("kokoro-"),
-      ).toBe(true);
+      expect(typeof m.id).toBe("string");
+      expect(m.id.length).toBeGreaterThan(0);
       expect(typeof m.lang).toBe("string");
       expect(typeof m.label).toBe("string");
       expect(typeof m.size_mb).toBe("number");
       expect(typeof m.quality).toBe("string");
       expect(m.gender === "male" || m.gender === "female").toBe(true);
     }
+    // A2 voice table (docs/13): sharvard×2 + daniela + davefx (es),
+    // kitten×4 (en, unchanged sids). Substring match: exact composite
+    // ids are the Rust catalog's business, presence is the contract's.
+    const has = (re: RegExp): number =>
+      body.models.filter((m) => re.test(m.id)).length;
+    expect(has(/sharvard/i)).toBe(2);
+    expect(has(/daniela/i)).toBe(1);
+    expect(has(/kitten/i)).toBe(4);
+    expect(has(/davefx/i)).toBe(1);
     // English: 2 masculine + 2 feminine (Kitten sids, one 25 MB model).
     const en = body.models.filter((m) => m.lang === "en");
     expect(en.filter((m) => m.gender === "male").length).toBe(2);
     expect(en.filter((m) => m.gender === "female").length).toBe(2);
-    // Spanish is Davefx alone: the Kokoro es sids were removed (their
-    // model produces NaN samples; neither v1_1 nor fp32 v1_0 has es).
+    // Spanish: Davefx M + Sharvard M/F + Daniela F = 2M + 2F (kokoro gone).
     const es = body.models.filter((m) => m.lang === "es");
-    expect(es.filter((m) => m.gender === "male").length).toBe(1);
-    expect(es.filter((m) => m.gender === "female").length).toBe(0);
+    expect(es.filter((m) => m.gender === "male").length).toBe(2);
+    expect(es.filter((m) => m.gender === "female").length).toBe(2);
     expect(typeof body.default_for_lang).toBe("object");
-    expect(body.default_for_lang["es"]).toContain("piper-");
+    expect(body.default_for_lang["es"]).toBeDefined();
     expect(body.default_for_lang["en"]).toBeDefined();
     // Sidecar stays stateless per call: no active voice server-side.
     expect(body.active).toBeNull();
@@ -851,7 +855,10 @@ describe("sidecar contract", () => {
       };
       expect(blankBody.error.code).not.toBe("invalid_voice");
     }
-  });
+    // Generous budget: the blank leg performs a REAL speak (daemon spawn
+    // + sherpa load + synth + headless playback attempt), which dwarfs
+    // the default 5 s test timeout. Assertions tolerate any outcome.
+  }, 120000);
 
   // Live audio only: needs the pi-listen engine + speakers. Excluded by
   // default; run with SMARTPC_TTS_LIVE=1 for the full ok-path proof
