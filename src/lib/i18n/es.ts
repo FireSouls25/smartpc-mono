@@ -79,6 +79,8 @@ export const es = {
   "voice.downloadingTts": "Descargando el modelo de voz (solo la primera vez)…",
   "voice.testPhrase": "Hola, esta es la voz de lectura de Smart PC en español.",
   "voice.chunkProgress": "● {i}/{n}",
+  "voice.voiceFallback":
+    "La voz elegida ya no existe; se usó la predeterminada.",
   "voice.busy":
     "El asistente está ocupado; tu texto quedó en el campo de entrada.",
   "voice.downloading": "Descargando el modelo de voz (solo la primera vez)…",

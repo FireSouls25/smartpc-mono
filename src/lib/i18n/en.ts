@@ -79,6 +79,8 @@ export const en: Record<I18nKey, string> = {
   "voice.downloadingTts": "Downloading the voice model (first time only)…",
   "voice.testPhrase": "Hi, this is the Smart PC reading voice in English.",
   "voice.chunkProgress": "● {i}/{n}",
+  "voice.voiceFallback":
+    "The picked voice no longer exists; using the default.",
   "voice.busy": "The assistant is busy; your words are kept in the input.",
   "voice.downloading": "Downloading the voice model (first time only)…",
   "voice.mode": "Mode",

@@ -153,6 +153,10 @@ let speakChunkIndex = $state(0);
 let speakChunkCount = $state(0);
 let ttsVoice = $state<string>(loadTtsVoice());
 let ttsTesting = $state(false);
+/** Catalog id currently downloading via `downloadTtsVoice` (null = none).
+ * First use fetches the model inside pi-listen (up to ~126 MB), so the
+ * Settings panel shows an indeterminate progress bar meanwhile. */
+let ttsDownloading = $state<string | null>(null);
 let lastSpokenId: string | null = null;
 // Transient acknowledgment ("heard the wake word, talk now"), cleared after
 // a few seconds or on the next state change.
@@ -583,7 +587,11 @@ async function speakText(text: string): Promise<void> {
   speakChunkIndex = 0;
   speaking = true;
   const lang = getLang();
-  const voice = ttsVoice || undefined;
+  let voice = ttsVoice || undefined;
+  // Stale-pick recovery: a stored voice the catalog no longer carries
+  // (removed model, older sidecar) 400s every chunk. Drop the pref once,
+  // fall back to the server default, and retry — never loop silently mute.
+  let fellBack = false;
   for (let i = 0; i < chunks.length; i++) {
     if (my !== speakGen) return;
     speakChunkIndex = i + 1;
@@ -610,7 +618,15 @@ async function speakText(text: string): Promise<void> {
         err instanceof ApiError &&
         (err.code === "invalid_voice" || err.code === "validation")
       ) {
-        // Bad chunk (unknown voice, validation): skip it, keep the queue.
+        if (voice && !fellBack) {
+          fellBack = true;
+          setTtsVoice("");
+          voice = undefined;
+          setNotice(t("voice.voiceFallback"));
+          i--;
+          continue;
+        }
+        // Bad chunk (validation): skip it, keep the queue.
         continue;
       }
       // Transport failure aborts the queue.
@@ -668,7 +684,21 @@ async function testTtsVoice(): Promise<void> {
       },
     );
   } catch (err) {
-    console.debug("[voice] test-play failed:", err);
+    if (err instanceof ApiError && err.code === "invalid_voice" && ttsVoice) {
+      // Stale pick (voice removed from the catalog): drop it, prove the
+      // server default instead so test-play never dies silently.
+      setTtsVoice("");
+      setNotice(t("voice.voiceFallback"));
+      try {
+        await voiceApi.speak(t("voice.testPhrase"), getLang(), undefined, {
+          timeoutMs: 180000,
+        });
+      } catch (inner) {
+        console.debug("[voice] test-play failed:", inner);
+      }
+    } else {
+      console.debug("[voice] test-play failed:", err);
+    }
   } finally {
     ttsTesting = false;
   }
@@ -677,6 +707,39 @@ async function testTtsVoice(): Promise<void> {
 function setTtsVoice(id: string): void {
   ttsVoice = id.trim().slice(0, 128);
   persist(ttsVoiceKey(getLang()), ttsVoice);
+}
+
+/**
+ * Download (first use) + prove a catalog voice: speaks the canned phrase
+ * with that voice on a 180 s budget. Doubles as the install trigger —
+ * pi-listen fetches the model, later speaks are instant. Returns whether
+ * the voice is now ready (Settings reloads its catalog on true).
+ */
+async function downloadTtsVoice(id: string): Promise<boolean> {
+  const clean = id.trim().slice(0, 128);
+  if (!clean || ttsDownloading) return false;
+  ttsDownloading = clean;
+  try {
+    await voiceApi.speak(t("voice.testPhrase"), getLang(), clean, {
+      timeoutMs: 180000,
+    });
+    return true;
+  } catch (err) {
+    if (
+      err instanceof ApiError &&
+      err.code === "invalid_voice" &&
+      ttsVoice === clean
+    ) {
+      // The catalog no longer carries this id: drop the stale pick so
+      // later speaks fall back to the default instead of failing mute.
+      setTtsVoice("");
+      setNotice(t("voice.voiceFallback"));
+    }
+    console.debug("[voice] download failed:", err);
+    return false;
+  } finally {
+    ttsDownloading = null;
+  }
 }
 
 /** Re-read the pref (Settings calls this on entry — the key is per-lang). */
@@ -724,6 +787,9 @@ export const voice = {
   get ttsTesting(): boolean {
     return ttsTesting;
   },
+  get ttsDownloading(): string | null {
+    return ttsDownloading;
+  },
   get error(): string {
     return error;
   },
@@ -752,6 +818,7 @@ export const voice = {
   speakText,
   stopSpeaking,
   testTtsVoice,
+  downloadTtsVoice,
   setTtsVoice,
   reloadTtsVoice,
 };
