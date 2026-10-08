@@ -66,6 +66,24 @@ fn text_of_result(result: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Join length-cut continuation chunks: cut mid-word (alphanumeric tail)
+/// glues directly (`audi` + `encia`), cut at a boundary takes one space.
+fn join_chunks(parts: Vec<String>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if !out.is_empty() {
+            let sep = if out.chars().last().is_some_and(|c| c.is_alphanumeric()) {
+                ""
+            } else {
+                " "
+            };
+            out.push_str(sep);
+        }
+        out.push_str(part.trim_start());
+    }
+    out
+}
+
 fn preview(s: &str) -> String {
     const N: usize = 300;
     if s.chars().count() <= N {
@@ -198,6 +216,27 @@ mod tests {
         assert!(should_record("press_key", false));
         assert!(!should_record("get_system_context", true));
         assert!(!should_record("get_system_context", false));
+    }
+
+    #[test]
+    fn continuation_chunks_join_without_mid_word_space() {
+        // The screenshot case: cut at "audi" + "encia…" glues directly.
+        assert_eq!(
+            join_chunks(vec![
+                "no pude detectar el audi".to_string(),
+                "encia del micro".to_string()
+            ]),
+            "no pude detectar el audiencia del micro"
+        );
+        // Cut at a boundary takes exactly one space.
+        assert_eq!(
+            join_chunks(vec![
+                "He abierto GitHub.".to_string(),
+                "He abierto YouTube.".to_string()
+            ]),
+            "He abierto GitHub. He abierto YouTube."
+        );
+        assert_eq!(join_chunks(vec![]), "");
     }
 
     #[test]
@@ -352,6 +391,14 @@ async fn run_turn_inner(
 
     let mut pending_steps: HashMap<String, PendingStep> = HashMap::new();
     let mut steps: Vec<TraceStep> = Vec::new();
+    // Cut-off recovery: `message_end` carries the assistant stop reason.
+    // A length-stop means the model was cut mid-text (output cap), not
+    // done — the settle loop below sends up to two continuations and the
+    // chunks are joined afterwards. Anything else settles the turn as-is.
+    let mut last_stop_reason: Option<String> = None;
+    let mut reply_parts: Vec<String> = Vec::new();
+    let mut continuations = 0u32;
+    loop {
     // Cancel check rides a short recv timeout: token streams stall between
     // events, and a cancelled turn must unwind promptly (not at TURN_TIMEOUT)
     // so the next send doesn't queue behind it on the per-user turn lock.
@@ -470,6 +517,20 @@ async fn run_turn_inner(
                 "compaction_start" | "compaction_end" => {
                     crate::diagnostics::push(format!("pi compaction event: {kind}"));
                 }
+                "message_end" => {
+                    // Last assistant stop reason wins: it describes the
+                    // text `get_last_assistant_text` will return below.
+                    if ev.pointer("/message/role").and_then(|v| v.as_str())
+                        == Some("assistant")
+                    {
+                        if let Some(sr) = ev
+                            .pointer("/message/stopReason")
+                            .and_then(|v| v.as_str())
+                        {
+                            last_stop_reason = Some(sr.to_string());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -490,12 +551,51 @@ async fn run_turn_inner(
         Ok(Ok(())) => {}
     }
 
-    let reply = cmd(sup, child, "get_last_assistant_text", json!({}))
+    let chunk = cmd(sup, child, "get_last_assistant_text", json!({}))
         .await?
         .pointer("/data/text")
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .to_string();
+    // Length-cut continuation: the model was stopped by the output cap
+    // mid-text. Ask once or twice to pick up exactly where it stopped;
+    // the chunks are joined below (no space when cut mid-word).
+    let got_text = !chunk.trim().is_empty();
+    if last_stop_reason.as_deref() == Some("length") && got_text && continuations < 2 {
+        continuations += 1;
+        last_stop_reason = None;
+        reply_parts.push(chunk);
+        crate::diagnostics::push(format!(
+            "pi: reply hit the output limit, continuing ({continuations}/2)..."
+        ));
+        let resume = if input.lang == "en" {
+            "Continue exactly where you left off, without repeating anything."
+        } else {
+            "Continúa exactamente donde te quedaste, sin repetir nada."
+        };
+        let mut follow = serde_json::Map::new();
+        follow.insert("id".to_string(), Value::String(sup.next_id("prompt")));
+        follow.insert("type".to_string(), Value::String("prompt".to_string()));
+        follow.insert("message".to_string(), Value::String(resume.to_string()));
+        if child
+            .command(Value::Object(follow), TURN_TIMEOUT)
+            .await
+            .is_ok()
+        {
+            continue;
+        }
+        // Continuation failed: keep what we have (chunk already stored)
+        // rather than failing the whole turn.
+        crate::diagnostics::push("pi: continuation prompt failed".to_string());
+        break;
+    }
+    if got_text {
+        reply_parts.push(chunk);
+    }
+    break;
+    }
+
+    let reply = join_chunks(reply_parts);
     if reply.trim().is_empty() {
         return Err(PiError::TurnFailed(
             "pi settled with no assistant text".to_string(),
