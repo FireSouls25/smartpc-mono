@@ -347,7 +347,10 @@ body {
     color: var(--fg);
     font-size: 0.875rem;
     line-height: 1.6;
-    max-width: 100%;
+    width: 100%;
+    max-width: 72ch;
+    margin-inline: auto;
+    text-align: left;
   }
   .reply-text p {
     margin: 0 0 0.625rem;
