@@ -93,8 +93,8 @@ npm run build-release -- --target=AppImage   # or dmg / nsis / portable
 
 What that does, in order: `vite build` → `cargo build --release` → stage the
 sidecar binary where `electron-builder.yml` picks it up → `electron-builder`.
-Installers land in `release/out/` (`smart-pc-0.1.0-<arch>.AppImage`,
-`…dmg`, `…-setup.exe`).
+Installers land in `release/out/` (`smartpc-linux-<arch>.AppImage` +
+`.tar.gz`, `smartpc-macos-<arch>.dmg`, `smartpc-windows-<arch>.exe`).
 
 - The sidecar must be **outside** the ASAR: it is copied to
   `resources/bin/` (via `extraResources`), which is where `main.cjs` looks

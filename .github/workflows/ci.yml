@@ -1,9 +1,13 @@
 name: ci
 
-# Fast checks on every push/PR. Release installers are NOT built here —
-# per-OS binaries are built only on version-tag pushes by release.yml
-# and attached to the GitHub Release.
-on: [push, pull_request]
+# Fast checks on normal pushes/PRs only. Tag pushes (`v*`) skip this
+# entirely — they run release.yml (build + publish) instead, so verify
+# and e2e never run twice for the same commit.
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
 
 jobs:
   verify:

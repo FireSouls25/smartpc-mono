@@ -18,7 +18,8 @@
 #   synth daemon are spawned via node/npx and are NOT bundled); the app
 #   starts without it and says so. Nothing to install for it here.
 # - macOS output is unsigned (Gatekeeper warning until signing is set up);
-#   Windows builds NSIS installers; Linux builds AppImage.
+#   Windows builds an NSIS exe; Linux builds AppImage + tarball; macOS a dmg.
+#   Update metadata (latest*.yml, *.blockmap) is never uploaded to Releases.
 # - First green run on Windows/macOS also serves as the first-ever compile
 #   check there: `screenshots`, `active-win-pos-rs`, whisper-rs/MSVC and
 #   keyring are the likely friction points if anything fails.
@@ -106,7 +107,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-${{ runner.os }}-${{ matrix.arch }}
-          path: release/out/*
+          # Installers only: electron-builder also writes update metadata
+          # (latest*.yml, *.blockmap, builder-debug.yml) — never attached
+          # to the Releases page.
+          path: |
+            release/out/*.AppImage
+            release/out/*.tar.gz
+            release/out/*.dmg
+            release/out/*.exe
           if-no-files-found: error
 
   publish:
@@ -119,5 +127,11 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: installers/*
+          # Installers only (AppImage + tarball, dmg, exe) — no update
+          # metadata or blockmaps.
+          files: |
+            installers/*.AppImage
+            installers/*.tar.gz
+            installers/*.dmg
+            installers/*.exe
           generate_release_notes: true

@@ -27,26 +27,31 @@ extraResources:
 asar: true
 
 # Per-OS installers. Override per run: `--dir`, `--target=AppImage`, etc.
+# File names are lowercase, no spaces: smartpc-<os>-<arch>.<ext>.
+# Only these land on the Releases page — electron-builder also writes
+# update metadata (latest*.yml, *.blockmap, builder-debug.yml) into
+# release/out/, but release.yml uploads just the installers below.
 linux:
   target:
     - AppImage
+    - tar.gz
   category: Utility
   # The sidecar needs a writable home for its db, models and vault; the
   # AppImage runs from a squashfs mount, so keep userData on $HOME (default).
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: smartpc-linux-${arch}.${ext}
 
 mac:
   target:
     - dmg
   category: public.app-category.utilities
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  artifactName: smartpc-macos-${arch}.${ext}
   # Not signed: `npm run build-release -- --dir` still produces a runnable
   # .app locally; distributing needs a Developer ID + notarization.
 
 win:
   target:
     - nsis
-  artifactName: ${productName}-${version}-setup.${ext}
+  artifactName: smartpc-windows-${arch}.${ext}
 
 nsis:
   oneClick: false
