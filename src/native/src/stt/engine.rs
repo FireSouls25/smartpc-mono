@@ -33,6 +33,19 @@ fn default_threads() -> i32 {
 fn silence_logs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
+        // Platform-split level type (verified against both compilers):
+        // whisper-rs declares ggml_log_level as c_uint, but the Windows
+        // toolchain resolves the callback slot as c_int — a u32 fn item
+        // fails there while i32 fails on Linux. If a future platform
+        // disagrees, its compiler will say so loudly here.
+        #[cfg(windows)]
+        unsafe extern "C" fn quiet(
+            _level: i32,
+            _text: *const std::ffi::c_char,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+        }
+        #[cfg(not(windows))]
         unsafe extern "C" fn quiet(
             _level: u32,
             _text: *const std::ffi::c_char,

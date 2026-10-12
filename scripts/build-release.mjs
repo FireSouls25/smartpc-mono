@@ -74,7 +74,7 @@ const mb = (fs.statSync(builtBin).size / 1024 / 1024).toFixed(1);
 console.log(`[release] staged bin/${binName} (${mb} MB)`);
 
 // 4. Package ------------------------------------------------------------------
-const builderArgs = ["electron-builder"];
+const builderArgs = ["electron-builder", "--publish", "never"];
 if (has("dir")) builderArgs.push("--dir");
 else if (arg("target")) builderArgs.push(`--${arg("target")}`);
 run("npx", builderArgs);

@@ -974,13 +974,16 @@ fn alias_candidates(kind: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// Linux-only PATH lookup (macOS `open -a` / Windows `start` resolve
+/// friendly names natively, so nothing calls this there).
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn path_dirs() -> Vec<std::path::PathBuf> {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "windows"))))]
 fn is_executable_file(p: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.is_file()
@@ -989,26 +992,13 @@ fn is_executable_file(p: &std::path::Path) -> bool {
             .unwrap_or(false)
 }
 
-#[cfg(windows)]
-fn is_executable_file(p: &std::path::Path) -> bool {
-    if !p.is_file() {
-        return false;
-    }
-    match p.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(
-            ext.to_lowercase().as_str(),
-            "exe" | "cmd" | "bat" | "com" | "ps1"
-        ),
-        None => false,
-    }
-}
-
 /// What to execute: a friendly name for the OS opener, or an exact binary.
 enum OpenTarget {
     /// Friendly name for the OS opener (`open -a` / `start` resolves it).
     /// Only produced on macOS/Windows; Linux always resolves to Binary.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     System(String),
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Binary(String),
     /// URL launch: exact program + argv. The URL is always a single argv
     /// element, never passed through a shell. `fast_exit_ok` marks opener
@@ -1057,6 +1047,7 @@ fn resolve_app(name: &str) -> Result<OpenTarget, ToolOutcome> {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn find_in_path(name: &str) -> Option<String> {
     for dir in path_dirs() {
         let candidate = dir.join(name);
@@ -1067,7 +1058,7 @@ fn find_in_path(name: &str) -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn find_in_path_normalized(norm: &str) -> Option<String> {
     let mut scanned = 0u32;
     for dir in path_dirs() {
@@ -1322,7 +1313,9 @@ fn enigo_key(name: &str) -> Option<enigo::Key> {
         "mute" => VolumeMute,
         "volume_up" => VolumeUp,
         "volume_down" => VolumeDown,
-        _ => return None,
+        // Fully qualified: some platforms also define a `Key::None`
+        // variant, which would shadow the Option constructor here.
+        _ => return std::option::Option::None,
     })
 }
 
