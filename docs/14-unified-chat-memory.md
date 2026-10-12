@@ -67,7 +67,7 @@ all need exactness) — the tree is cache, never source of truth.
 ## 3. Memory layer (W3, sidecar + catalog)
 
 - New `memory_notes` table: `id, user_id, text (≤280), topic, source
-  (user|extracted), created_at, updated_at`. Append-only; NO delete
+(user|extracted), created_at, updated_at`. Append-only; NO delete
   endpoint in v1 (mirrors OptMem log + our audit posture).
 - `wake`: top notes (recency × topic overlap with the incoming message,
   capped tokens) prepended with `turn_context` every turn. Replaces the

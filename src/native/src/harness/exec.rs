@@ -993,12 +993,15 @@ fn is_executable_file(p: &std::path::Path) -> bool {
 }
 
 /// What to execute: a friendly name for the OS opener, or an exact binary.
+// NOTE: both variants exist on every platform on purpose. Gating variants
+// with `#[cfg]` breaks the cross-compile (macOS/Windows builds reference
+// `Binary`, Linux matches on `System`) — the OS split lives in the
+// constructors/match arms below, not in the type.
+#[allow(dead_code)]
 enum OpenTarget {
     /// Friendly name for the OS opener (`open -a` / `start` resolves it).
     /// Only produced on macOS/Windows; Linux always resolves to Binary.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     System(String),
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Binary(String),
     /// URL launch: exact program + argv. The URL is always a single argv
     /// element, never passed through a shell. `fast_exit_ok` marks opener
@@ -1085,17 +1088,26 @@ fn find_in_path_normalized(norm: &str) -> Option<String> {
 fn spawn_target(target: &OpenTarget) -> Result<std::process::Child, ToolOutcome> {
     use std::process::Stdio;
     let mut cmd = match target {
-        #[cfg(target_os = "macos")]
         OpenTarget::System(name) => {
-            let mut c = std::process::Command::new("open");
-            c.arg("-a").arg(name);
-            c
-        }
-        #[cfg(target_os = "windows")]
-        OpenTarget::System(name) => {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "start", "", name]);
-            c
+            #[cfg(target_os = "macos")]
+            {
+                let mut c = std::process::Command::new("open");
+                c.arg("-a").arg(name);
+                c
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let mut c = std::process::Command::new("cmd");
+                c.args(["/C", "start", "", name]);
+                c
+            }
+            // Never constructed on Linux (resolve_app returns Binary there),
+            // but the variant exists so macOS/Windows builds compile: fall
+            // back to spawning the name directly.
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                std::process::Command::new(name)
+            }
         }
         OpenTarget::Binary(path) => std::process::Command::new(path),
         OpenTarget::Url { program, args, .. } => {
@@ -1133,7 +1145,6 @@ fn spawn_verified(target: OpenTarget, display: &str) -> ToolOutcome {
         }
         Ok(Some(status)) if status.success() => match target {
             // Launcher wrappers (open/start) exit 0 on handoff: that IS success.
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             OpenTarget::System(_) => ok(format!("launched {display}")),
             // A directly-spawned binary exiting instantly launched nothing.
             OpenTarget::Binary(_) => err(format!(

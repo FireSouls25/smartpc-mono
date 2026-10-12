@@ -1,19 +1,32 @@
 name: ci
+
+# Fast checks on every push/PR. Release installers are NOT built here —
+# per-OS binaries are built only on version-tag pushes by release.yml
+# and attached to the GitHub Release.
 on: [push, pull_request]
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Sidecar voice needs whisper.cpp (cmake + C++) and ALSA headers.
-      # keyring/secret-service needs dbus headers (present on most images,
-      # pinned here so a bare image still builds).
-      - run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev libdbus-1-dev pkg-config
+      # Native deps for `cargo test`: whisper.cpp needs cmake + C++;
+      # cpal needs ALSA headers; keyring/secret-service needs dbus headers;
+      # screenshots/enigo/active-win-pos need X11 headers at link time
+      # (missing libX11/libXrandr/libxcb = "unable to find library" link
+      # failure). Versions of Node/Rust come from .nvmrc / rust-toolchain.toml
+      # so CI builds with exactly what dev uses.
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          cmake pkg-config
+          libasound2-dev libdbus-1-dev
+          libx11-dev libxrandr-dev libxcb1-dev
+          libxtst-dev libxi-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       # Types + lint + format + unit; then sidecar suite + contract
@@ -22,41 +35,23 @@ jobs:
       - run: cargo test --manifest-path src/native/Cargo.toml
       - run: npm run test:contract
 
-  release:
-    # The release path breaks silently (stale sidecar binary, wrong resources
-    # layout), so CI builds an unpacked package on every push instead of
-    # discovering it at release time.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Package (unpacked)
-        run: node scripts/build-release.mjs --dir
-      - name: Check the packaged layout
-        run: |
-          # The sidecar must be unpacked next to the asar, executable.
-          test -x release/out/linux-unpacked/resources/bin/smartpc-native
-          test -f release/out/linux-unpacked/resources/app/dist/index.html
-          test -f release/out/linux-unpacked/resources/app/electron/main.cjs
-
   fast-e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Same native deps: the harness boots the sidecar via webServer.
-      - run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev libdbus-1-dev pkg-config
+      # Same native deps: the harness boots the sidecar via webServer,
+      # which links the full native binary (needs the X11 headers too).
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          cmake pkg-config
+          libasound2-dev libdbus-1-dev
+          libx11-dev libxrandr-dev libxcb1-dev
+          libxtst-dev libxi-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium

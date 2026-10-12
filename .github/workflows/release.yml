@@ -2,19 +2,26 @@
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Per-OS notes (see the cross-platform review in chat, 2026-10-12):
+# This is the ONLY workflow that builds release outputs. Normal pushes/PRs
+# run ci.yml (checks + tests) and never produce installers.
+#
+# Toolchain versions come from .nvmrc / rust-toolchain.toml so releases
+# build with exactly what dev uses (no hardcoded versions here).
+#
+# Per-OS notes:
 # - Native build deps differ per runner: cmake + C++ everywhere (whisper.cpp
-#   compiles from bundled sources), plus libasound2-dev on Linux only
-#   (cpal/ALSA). macOS/Windows need no audio headers (CoreAudio/WASAPI).
+#   compiles from bundled sources), plus ALSA + dbus + X11 headers on Linux
+#   only (cpal/ALSA, keyring/dbus, screenshots+enigo/X11). macOS/Windows need
+#   no audio/X headers (CoreAudio/WASAPI, native keychain/credential store).
 # - MSVC is the default Rust toolchain on windows-latest (no override).
-# - Node 22+ is a *runtime* prerequisite on user machines (pi agent + TTS
+# - Node 26+ is a *runtime* prerequisite on user machines (pi agent + TTS
 #   synth daemon are spawned via node/npx and are NOT bundled); the app
 #   starts without it and says so. Nothing to install for it here.
 # - macOS output is unsigned (Gatekeeper warning until signing is set up);
 #   Windows builds NSIS installers; Linux builds AppImage.
 # - First green run on Windows/macOS also serves as the first-ever compile
 #   check there: `screenshots`, `active-win-pos-rs`, whisper-rs/MSVC and
-#   keyring/secret-service are the likely friction points if anything fails.
+#   keyring are the likely friction points if anything fails.
 
 name: release
 
@@ -44,7 +51,12 @@ jobs:
 
       - name: Native build deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev libdbus-1-dev pkg-config
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          cmake pkg-config
+          libasound2-dev libdbus-1-dev
+          libx11-dev libxrandr-dev libxcb1-dev
+          libxtst-dev libxi-dev libxkbcommon-dev
 
       - name: Native build deps (macOS)
         if: runner.os == 'macOS'
@@ -62,7 +74,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - run: npm ci
