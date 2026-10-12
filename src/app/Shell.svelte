@@ -40,15 +40,6 @@
 
   // Global push-to-talk: the mic toggle shortcut works from anywhere.
   onMount(() => installVoiceHotkey());
-
-  const engineLabel = () =>
-    !protoOk
-      ? "MISMATCH"
-      : providers.providersLoading
-        ? "PROBING"
-        : providers.activeAvailable()
-          ? "READY"
-          : "NO ENGINE";
 </script>
 
 <div class="dot-bg flex min-h-dvh flex-col lg:h-dvh lg:overflow-hidden">

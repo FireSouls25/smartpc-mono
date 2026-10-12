@@ -40,6 +40,8 @@ export const es = {
     "Ese correo ya lo usa una cuenta local: entra con tu contraseña local o usa otro correo.",
   "auth.cloudUnavailable": "La nube no responde; inténtalo de nuevo.",
   "auth.invalidToken": "La sesión caducó; entra de nuevo.",
+  "auth.offline":
+    "Sin conexión con el servicio local. Comprueba que la aplicación esté en ejecución.",
   "common.loading": "Cargando…",
   "common.done": "Entendido",
   "common.search": "Buscar…",

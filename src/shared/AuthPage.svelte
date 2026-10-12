@@ -61,10 +61,15 @@
           return t("auth.cloudUnavailable");
         case "invalid_token":
           return t("auth.invalidToken");
+        case "timeout":
+          return t("chat.timeout");
         default:
           break;
       }
     }
+    // Network-level failure (sidecar down): fetch throws a bare
+    // TypeError with a browser-English message — never show it raw.
+    if (err instanceof TypeError) return t("auth.offline");
     return err instanceof Error ? err.message : "Error";
   }
 

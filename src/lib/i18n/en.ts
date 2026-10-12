@@ -40,6 +40,8 @@ export const en: Record<I18nKey, string> = {
     "That email belongs to a local account: sign in with your local password or use another email.",
   "auth.cloudUnavailable": "The cloud is not responding; try again.",
   "auth.invalidToken": "The session expired; sign in again.",
+  "auth.offline":
+    "No connection to the local service. Check that the app is running.",
   "common.loading": "Loading…",
   "common.done": "Got it",
   "common.search": "Search…",
@@ -63,8 +65,7 @@ export const en: Record<I18nKey, string> = {
   "chat.copy": "Copy text",
   "chat.copied": "Copied!",
   "chat.timeout": "The response took too long; try again.",
-  "chat.rotated":
-    "Context refreshed — full history in Settings → History",
+  "chat.rotated": "Context refreshed — full history in Settings → History",
   "agent.title": "Agent conversation",
   "agent.connected": "Connected",
   "agent.ready": "Ready · reasoning & synthesizing",
