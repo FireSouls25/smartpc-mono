@@ -130,7 +130,9 @@ describe("sidecar contract", () => {
         typeof p["installed"] === "boolean" || p["installed"] === null,
       ).toBe(true);
     }
-  });
+    // First hit spawns pi + probes localhost servers: seconds on a cold
+    // or loaded box, dwarfs the 5 s default timeout.
+  }, 60000);
 
   test("auth failures use the error envelope", async () => {
     const res = await fetch(`${BASE}/v1/auth/login`, {
@@ -435,6 +437,17 @@ describe("sidecar contract", () => {
         })
       ).json()) as { events: { type: string; epoch: number }[] };
       expect(polled.events.length).toBeGreaterThan(0);
+      // Headless boxes can pass the sync mic check yet fail the async
+      // open (device enumerated but unopenable): a first `error` event is
+      // the same clean no-mic outcome as the sync 503 path above.
+      if (polled.events[0].type === "error") {
+        for (const ev of polled.events) expect(ev.epoch).toBe(body.epoch);
+        await fetch(`${BASE}/v1/voice/stop`, {
+          method: "POST",
+          headers: gate,
+        });
+        return;
+      }
       expect(polled.events[0].type).toBe("started");
       for (const ev of polled.events) expect(ev.epoch).toBe(body.epoch);
       await fetch(`${BASE}/v1/voice/stop`, { method: "POST", headers: gate });
