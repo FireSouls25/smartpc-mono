@@ -31,6 +31,28 @@ fn print_usage() {
     eprintln!("usage: smartpc-native --port <n|0=auto> --token <min-16-chars> [--db <path>]");
 }
 
+/// Drop the parent agent session's `PI_*` vars before anything spawns.
+/// When the sidecar itself runs inside a pi session (dev terminal, harness
+/// runs), these leak into every pi/TTS child: `PI_PACKAGE_DIR` in
+/// particular redirects the child's theme dir at a foreign pi install
+/// (proven: pinned 0.87.0 reading 1.x `okhsl()` theme colors it cannot
+/// parse → child exits at boot → every turn fails). The child contract
+/// uses `SMARTPC_*` vars only; `PI_BIN` (explicit user override) and
+/// unrelated vars are left untouched.
+fn scrub_parent_pi_env() {
+    for key in [
+        "PI_CODING_AGENT",
+        "PI_MODEL",
+        "PI_PACKAGE_DIR",
+        "PI_PROVIDER",
+        "PI_REASONING_LEVEL",
+        "PI_SESSION_FILE",
+        "PI_SESSION_ID",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
 struct Args {
     port: u16,
     token: Option<String>,
@@ -71,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    scrub_parent_pi_env();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -182,4 +205,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_removes_session_vars_keeps_the_rest() {
+        std::env::set_var("PI_PACKAGE_DIR", "/foreign-pi");
+        std::env::set_var("PI_SESSION_ID", "parent-session");
+        scrub_parent_pi_env();
+        assert!(std::env::var("PI_PACKAGE_DIR").is_err());
+        assert!(std::env::var("PI_SESSION_ID").is_err());
+        // Unrelated env (PATH, PI_BIN override) is never touched.
+        assert!(std::env::var("PATH").is_ok());
+    }
 }
