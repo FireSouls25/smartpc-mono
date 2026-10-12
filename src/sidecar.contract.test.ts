@@ -169,6 +169,47 @@ describe("sidecar contract", () => {
     expect(body.error.code).toBe("unauthorized");
   });
 
+  test("fresh accounts have no preselected provider or model", async () => {
+    const tag = `n${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    // Never chosen: nulls, not a silent ollama default.
+    const sel = await fetch(`${BASE}/v1/ai/selection`, {
+      headers: authed,
+    });
+    expect(sel.ok).toBe(true);
+    expect(await sel.json()).toEqual({ provider: null, model: null });
+    // Sending without any selection fails closed instead of running
+    // under a preselected provider.
+    const send = await fetch(`${BASE}/v1/ai/chat`, {
+      method: "POST",
+      headers: authed,
+      body: JSON.stringify({ message: "hola" }),
+    });
+    expect(send.status).toBe(400);
+    const sendBody = (await send.json()) as { error: { code: string } };
+    expect(sendBody.error.code).toBe("no_selection");
+  });
+
   test("provider keys validate ids and fail closed without keys", async () => {
     const tag = `k${Date.now()}${Math.floor(Math.random() * 1e6)}`;
     await fetch(`${BASE}/v1/auth/register`, {

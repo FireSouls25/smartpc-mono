@@ -90,8 +90,9 @@ export const aiApi = {
       { method: "POST", timeoutMs: 45000 },
     ),
 
+  // Nulls until the user picks: nothing is preselected server-side.
   selection: () =>
-    api<{ provider: string; model: string | null }>(
+    api<{ provider: string | null; model: string | null }>(
       "/v1/ai/selection",
       withAuth(auth.token ?? undefined),
     ),

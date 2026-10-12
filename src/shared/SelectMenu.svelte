@@ -18,12 +18,14 @@
     onChange,
     label,
     align = "up",
+    placeholder = "",
   }: {
     options: MenuOption[];
     value: string;
     onChange: (v: string) => void;
     label: string;
     align?: "up" | "down";
+    placeholder?: string;
   } = $props();
 
   let open = $state(false);
@@ -88,7 +90,7 @@
   >
     <span class="faint">{label}</span>
     <span class="font-semibold" style="color: var(--fg);">
-      {current()?.label ?? value}
+      {current()?.label ?? (value || placeholder)}
     </span>
     <svg
       viewBox="0 0 24 24"

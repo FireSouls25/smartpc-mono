@@ -19,13 +19,20 @@ let keyError = $state("");
 let keyNotice = $state("");
 let startingProvider = $state<string | null>(null);
 let startError = $state("");
-let activeProvider = $state("ollama");
+// Empty until the user picks: the app asks for a provider and a model,
+// nothing is preselected (fresh backend answers selection with nulls).
+let activeProvider = $state("");
 let activeModel = $state("");
 let contextWindow = $state<number | null>(null);
 
-export function defaultModelFor(list: ProviderInfo[], id: string): string {
-  const p = list.find((x) => x.id === id);
-  return p?.default_model || p?.models[0] || "";
+/** Fresh accounts have no selection: sending (typed or voice) asks first. */
+function requireSelection(): boolean {
+  if (!activeProvider || !activeModel) {
+    selectError = t("chat.noSelection");
+    return false;
+  }
+  selectError = "";
+  return true;
 }
 
 function syncContextWindow(): void {
@@ -50,10 +57,11 @@ async function loadProviders(opts?: { silent?: boolean }): Promise<void> {
     if (!silent) {
       try {
         const sel = await aiApi.selection();
-        activeProvider = sel.provider;
-        activeModel = sel.model || defaultModelFor(providers, activeProvider);
+        // Nulls on a fresh account: stay unselected and let the UI ask.
+        activeProvider = sel.provider ?? "";
+        activeModel = sel.model ?? "";
       } catch {
-        /* first run: no selection stored yet */
+        /* unreachable backend: keep whatever was showing */
       }
     }
     syncContextWindow();
@@ -122,7 +130,9 @@ async function selectProvider(
   try {
     const res = await aiApi.select(id, model ?? undefined);
     activeProvider = res.provider;
-    activeModel = res.model || defaultModelFor(providers, activeProvider);
+    // Provider-only picks persist with a null model: stay model-less until
+    // the user chooses one instead of filling in the catalog default.
+    activeModel = res.model ?? "";
     syncContextWindow();
   } catch (err) {
     selectError = err instanceof Error ? err.message : "Error";
@@ -286,6 +296,7 @@ export const providerStore = {
   activeAvailable,
   setContextWindow,
   loadProviders,
+  requireSelection,
   startProviderWatch,
   stopProviderWatch,
   startProvider,

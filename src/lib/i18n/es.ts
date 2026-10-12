@@ -60,6 +60,8 @@ export const es = {
   "chat.stop": "Detener",
   "chat.provider": "Proveedor",
   "chat.model": "Modelo",
+  "chat.choose": "Elige…",
+  "chat.noSelection": "Elige un proveedor y un modelo para empezar.",
   "chat.hello": "Hola, ¿qué hacemos hoy?",
   "chat.replay": "Reproducir voz",
   "chat.copy": "Copiar texto",

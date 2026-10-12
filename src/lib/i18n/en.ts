@@ -60,6 +60,8 @@ export const en: Record<I18nKey, string> = {
   "chat.stop": "Stop",
   "chat.provider": "Provider",
   "chat.model": "Model",
+  "chat.choose": "Choose…",
+  "chat.noSelection": "Choose a provider and a model to get started.",
   "chat.hello": "Hi, what shall we do today?",
   "chat.replay": "Replay voice",
   "chat.copy": "Copy text",

@@ -141,15 +141,19 @@
           class="flex items-center justify-between gap-2 font-semibold"
           style="color: var(--fg);"
         >
-          <span class="truncate"
-            >{providers.activeModel || providers.activeProvider}</span
-          >
-          <span
-            class="px-1 uppercase tracking-widest"
-            style="background: var(--surface-2); color: var(--accent);"
-          >
-            {providers.activeProvider}
-          </span>
+          {#if providers.activeProvider}
+            <span class="truncate"
+              >{providers.activeModel || t("chat.choose")}</span
+            >
+            <span
+              class="px-1 uppercase tracking-widest"
+              style="background: var(--surface-2); color: var(--accent);"
+            >
+              {providers.activeProvider}
+            </span>
+          {:else}
+            <span class="truncate">{t("chat.noSelection")}</span>
+          {/if}
         </div>
         <div class="mt-0.5" style="color: var(--fg-muted);">
           {providers.activeAvailable()
@@ -460,10 +464,16 @@
       </p>
     {/if}
 
+    {#if !providers.activeProvider || !providers.activeModel}
+      <p class="chip" style="border-color: var(--accent); color: var(--fg);">
+        {t("chat.noSelection")}
+      </p>
+    {/if}
     <div class="flex flex-wrap items-center gap-2">
       <SelectMenu
         label={t("chat.provider")}
         value={providers.activeProvider}
+        placeholder={t("chat.choose")}
         options={providers.providers.map((p) => ({
           value: p.id,
           label: p.id,
@@ -475,6 +485,7 @@
       <SelectMenu
         label={t("chat.model")}
         value={providers.activeModel}
+        placeholder={t("chat.choose")}
         options={providers.activeModels().map((m) => ({ value: m, label: m }))}
         onChange={(v) => void providers.selectModel(v)}
       />
@@ -499,7 +510,7 @@
     {#if providers.selectError}
       <p class="error-box">{providers.selectError}</p>
     {/if}
-    {#if !providers.activeAvailable() && !providers.providersLoading}
+    {#if providers.activeProvider && !providers.activeAvailable() && !providers.providersLoading}
       <p class="chip" style="border-color: var(--warn); color: var(--warn);">
         {t("providers.needServer")}
       </p>

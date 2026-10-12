@@ -202,7 +202,8 @@ fn title_of(message: &str) -> String {
     }
 }
 
-/// Current persisted selection (or the default when never chosen).
+/// Current persisted selection — or nulls when never chosen. Nothing is
+/// preselected: the UI asks the user to pick a provider and a model.
 pub async fn selection(
     State(s): State<AppState>,
     Extension(AuthedUser(uid)): Extension<AuthedUser>,
@@ -219,7 +220,7 @@ pub async fn selection(
             .into_response(),
         Ok(None) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "provider": "ollama", "model": null })),
+            Json(serde_json::json!({ "provider": null, "model": null })),
         )
             .into_response(),
         Err(e) => (
@@ -357,7 +358,8 @@ pub async fn chat(
             .into_response()
     };
 
-    // Resolve provider/model first: explicit > persisted > default.
+    // Resolve provider/model first: explicit > persisted. No default: a
+    // fresh account must pick a provider + model before the first turn.
     let persisted: Option<Selection> = match lock_chat(&s) {
         Ok(store) => store.get_selection(&uid).ok().flatten(),
         Err(r) => return r,
@@ -371,8 +373,8 @@ pub async fn chat(
         Ok(v) => v,
         Err(r) => return r,
     };
-    // Missing local model (fresh installs ask for `llama3.1`): download it
-    // once instead of failing every turn, typed or voice-driven.
+    // Missing local model: download it once instead of failing every turn,
+    // typed or voice-driven.
     if agent.name() == "ollama" {
         if let Err(e) = crate::ai::ollama::ensure_model_present(&model_name).await {
             return pull_error(&e);
@@ -548,12 +550,25 @@ fn resolve_turn(
     persisted: Option<&super::model::Selection>,
     uid: &str,
 ) -> Result<(TurnProvider, String, String), Response> {
-    let prov_name = provider
+    // No silent default: without an explicit or persisted provider the
+    // caller must choose first (the UI asks; nothing is preselected).
+    let prov_name: String = match provider
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| persisted.as_ref().map(|p| p.provider.clone()))
-        .unwrap_or_else(|| "ollama".into());
+    {
+        Some(name) => name,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "no_selection", "message": "no provider selected — choose a provider and model first", "field": "provider" }
+                })),
+            )
+                .into_response());
+        }
+    };
     let agent = turn_provider(&prov_name, uid)?;
     let model_name = model
         .map(str::trim)

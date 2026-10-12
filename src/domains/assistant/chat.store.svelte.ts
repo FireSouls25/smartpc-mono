@@ -153,6 +153,9 @@ let sendController: AbortController | null = null;
 async function send(text: string): Promise<boolean> {
   const clean = text.trim();
   if (!clean || orb === "thinking") return false;
+  // Nothing preselected: typed and voice sends alike ask first (the draft
+  // is kept so nothing is lost).
+  if (!providerStore.requireSelection()) return false;
   // The rotation chip refers to the turn just sent: any new send retires it.
   justRotated = false;
   messages = [...messages, { role: "user", text: clean }];
