@@ -323,6 +323,36 @@
           </div>
         {/if}
       {/each}
+      {#if chat.justRotated}
+        <div class="flex items-center gap-2" role="status">
+          <span
+            class="flex-1 border-t"
+            style="border-color: var(--border-strong);"
+            aria-hidden="true"
+          ></span>
+          <span
+            class="chip"
+            style="border-color: var(--accent); color: var(--fg);"
+          >
+            {t("chat.rotated")}
+          </span>
+          <button
+            type="button"
+            class="icon-btn"
+            style="padding: 0.25rem;"
+            title={t("common.hide")}
+            aria-label={t("common.hide")}
+            onclick={() => chat.clearRotated()}
+          >
+            ✕
+          </button>
+          <span
+            class="flex-1 border-t"
+            style="border-color: var(--border-strong);"
+            aria-hidden="true"
+          ></span>
+        </div>
+      {/if}
     </div>
 
     <form

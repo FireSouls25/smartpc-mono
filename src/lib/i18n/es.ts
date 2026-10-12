@@ -63,6 +63,8 @@ export const es = {
   "chat.copy": "Copiar texto",
   "chat.copied": "¡Copiado!",
   "chat.timeout": "La respuesta tardó demasiado; inténtalo de nuevo.",
+  "chat.rotated":
+    "Contexto renovado — historial completo en Ajustes → Historial",
   "agent.title": "Conversación del agente",
   "agent.connected": "Conectado",
   "agent.ready": "Lista · razonando y sintetizando",
@@ -176,6 +178,9 @@ export const es = {
   "settings.ai": "Modelo de IA",
   "settings.voice": "Voz",
   "settings.account": "Cuenta",
+  "settings.history": "Historial",
+  "settings.historyNote":
+    "Tus conversaciones guardadas. Abrir una la muestra en el chat sin cambiar tu modelo; eliminarla la borra para siempre.",
   "settings.providerNote": "Solo se pueden elegir proveedores detectados.",
   "settings.accountNote": "Tu sesión en este equipo.",
   "settings.diagnostics": "Diagnóstico",

@@ -172,12 +172,422 @@ fn arg_str(args: &serde_json::Value, key: &str) -> Result<String, ToolOutcome> {
         .ok_or_else(|| err(format!("missing or invalid string argument: {key}")))
 }
 
+// ---------------------------------------------------------------------
+// Memory layer (wave 14 §3, sidecar + catalog). Local-only v1: notes live
+// in SQLite `memory_notes` (append-only, never synced — export() ignores
+// the table) and every read/write here is ownership-scoped by user_id.
+//
+// Plumbing: tool calls arrive via the pi bridge (`pi::routes::tool`), which
+// this file must not import (bridge owns AppState). Instead `pi::turn`
+// installs the turn's store into the slot below for the duration of the
+// turn; `execute()` routes memory_* calls through it. Prefer this over
+// widening `execute()`'s signature (dozens of call sites + tests).
+// ---------------------------------------------------------------------
+
+use crate::chat::store::{ChatStore, MemoryNote, MEMORY_NOTE_MAX_CHARS};
+
+/// Inline-merge cap (§4): at most 12 lines per topic in any read view.
+/// Fixed constant (no env override — §4 overrides cover rotation only).
+pub const MERGE_TOPIC_CAP: usize = 12;
+/// Keyword-recall hits per call (small-model prompt safety).
+pub const MEMORY_RECALL_HITS: usize = 5;
+/// Wake budget per turn prepend (capped tokens, §3).
+pub const MEMORY_WAKE_MAX_CHARS: usize = 800;
+/// Read cap for ranking passes (local-only v1; revisit with FTS5).
+const MEMORY_LIST_CAP: i64 = 500;
+
+struct InstalledMemoryCtx {
+    chat: std::sync::Arc<std::sync::Mutex<ChatStore>>,
+    user_id: String,
+    provider_id: String,
+}
+
+static TURN_MEMORY_CTX: std::sync::OnceLock<
+    std::sync::Mutex<Option<InstalledMemoryCtx>>,
+> = std::sync::OnceLock::new();
+
+fn memory_slot(
+) -> &'static std::sync::Mutex<Option<InstalledMemoryCtx>> {
+    TURN_MEMORY_CTX.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn lock_slot(
+) -> std::sync::MutexGuard<'static, Option<InstalledMemoryCtx>> {
+    memory_slot().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Holds the turn's memory context; uninstalls on drop. `pi::turn` keeps
+/// one alive for the whole turn (tool calls land mid-turn via the bridge).
+/// Never held across an await by callers — install, run, drop.
+pub(crate) struct MemoryCtxGuard {
+    _private: (),
+}
+
+impl Drop for MemoryCtxGuard {
+    fn drop(&mut self) {
+        *lock_slot() = None;
+    }
+}
+
+/// Install this turn's memory context (store + owner + active provider for
+/// the abstractive-merge gate). Called once per turn by `pi::turn`.
+pub(crate) fn install_memory_ctx(
+    chat: &std::sync::Arc<std::sync::Mutex<ChatStore>>,
+    user_id: &str,
+    provider_id: &str,
+) -> MemoryCtxGuard {
+    *lock_slot() = Some(InstalledMemoryCtx {
+        chat: std::sync::Arc::clone(chat),
+        user_id: user_id.to_string(),
+        provider_id: provider_id.to_string(),
+    });
+    MemoryCtxGuard { _private: () }
+}
+
+/// Lowercased alphanumeric tokens, len > 2 (drops el/la/de/en/y… noise in
+/// both languages without a stop-word list to drift).
+fn memory_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Keyword overlap of query tokens against note text + topic tokens.
+fn note_score(note: &MemoryNote, query_tokens: &[String]) -> usize {
+    if query_tokens.is_empty() {
+        return 0;
+    }
+    let mut hay = memory_tokens(&note.text);
+    if let Some(t) = note.topic.as_deref() {
+        hay.extend(memory_tokens(t));
+    }
+    query_tokens
+        .iter()
+        .filter(|q| hay.iter().any(|h| h == *q))
+        .count()
+}
+
+/// Wake selection (§3): top notes by (topic-weighted overlap × recency),
+/// newest-first input, capped at `max_chars`. Zero overlap → no prepend
+/// (a clean prompt beats irrelevant memory).
+pub fn select_wake_notes(
+    notes_newest_first: &[MemoryNote],
+    message: &str,
+    max_chars: usize,
+) -> Vec<MemoryNote> {
+    let query = memory_tokens(message);
+    let mut scored: Vec<(usize, &MemoryNote)> = notes_newest_first
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let recency = notes_newest_first.len().saturating_sub(i);
+            (note_score(n, &query) * 10 + recency.min(9), n)
+        })
+        .filter(|(s, _)| *s >= 10)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for (_, n) in scored {
+        // Full rendered line cost (`- text [topic]`), so unbounded topics
+        // cannot bypass the wake budget (topic itself is capped at 64).
+        let len = 2 + n.text.chars().count()
+            + n.topic.as_deref().map(|t| t.chars().count() + 3).unwrap_or(0);
+        if !out.is_empty() && used + len > max_chars {
+            break;
+        }
+        used += len;
+        out.push(n.clone());
+        if used >= max_chars {
+            break;
+        }
+    }
+    out
+}
+
+/// Turn-entry helper for `pi::turn`: newest notes ranked against the full
+/// turn message (already includes turn_context; overlap scoring tolerates
+/// the noise), capped to the wake budget.
+pub fn load_wake_notes(
+    store: &ChatStore,
+    user_id: &str,
+    message: &str,
+) -> Vec<MemoryNote> {
+    let notes = store
+        .list_memory_notes(user_id, MEMORY_LIST_CAP)
+        .unwrap_or_default();
+    select_wake_notes(&notes, message, MEMORY_WAKE_MAX_CHARS)
+}
+
+/// Provider-capability gate for abstractive merge (§3). v1 default: SAFE —
+/// never abstractive (small-model safety, same rationale as §2 ruling out
+/// abstractive handoff summaries). The gate exists so a future change can
+/// allowlist capable providers here; until then every merge is verbatim.
+pub fn provider_allows_abstractive(provider_id: &str) -> bool {
+    let _ = provider_id;
+    false
+}
+
+/// Inline merge (§3): at most MERGE_TOPIC_CAP lines per topic. Oldest
+/// excess notes compact into ONE leading verbatim-concat line (≤280 chars
+/// so it could itself be a note); the rest stay verbatim. Input is oldest-
+/// first (zoom order). Read-time only — the table stays pure append.
+pub fn merged_topic_view(
+    notes_oldest_first: &[MemoryNote],
+    provider_id: &str,
+) -> Vec<String> {
+    if notes_oldest_first.len() <= MERGE_TOPIC_CAP {
+        return notes_oldest_first
+            .iter()
+            .map(|n| n.text.clone())
+            .collect();
+    }
+    debug_assert!(!provider_allows_abstractive(provider_id));
+    let excess = notes_oldest_first.len() - (MERGE_TOPIC_CAP - 1);
+    let mut merged = format!("(merged {excess} older notes) ");
+    for n in &notes_oldest_first[..excess] {
+        if merged.chars().count() >= MEMORY_NOTE_MAX_CHARS {
+            break;
+        }
+        if !merged.ends_with(' ') {
+            merged.push_str(" … ");
+        }
+        merged.push_str(&n.text);
+    }
+    if merged.chars().count() > MEMORY_NOTE_MAX_CHARS {
+        merged = merged.chars().take(MEMORY_NOTE_MAX_CHARS - 1).collect();
+        merged.push('…');
+    }
+    let mut out = vec![merged];
+    out.extend(
+        notes_oldest_first[excess..]
+            .iter()
+            .map(|n| n.text.clone()),
+    );
+    out
+}
+
+/// Rotation boundary note (§3): lets zoom walk the chain across the W2
+/// rotation (old row → new row). The W2 rotation engine calls
+/// `write_rotation_boundary_note` right after linking the new session.
+pub fn rotation_boundary_text(topic: &str, old_session: &str, new_session: &str) -> String {
+    let short_topic: String = topic.chars().take(120).collect();
+    format!("topic '{short_topic}' continued in session {new_session} (from {old_session})")
+}
+
+pub fn write_rotation_boundary_note(
+    store: &ChatStore,
+    user_id: &str,
+    topic: &str,
+    old_session_id: &str,
+    new_session_id: &str,
+) -> rusqlite::Result<MemoryNote> {
+    let text = rotation_boundary_text(topic, old_session_id, new_session_id);
+    // Session ids are fixed-size, but a hostile topic must never break
+    // the 280-char invariant: trim the topic side, never the ids.
+    let text = if text.chars().count() > MEMORY_NOTE_MAX_CHARS {
+        let keep = MEMORY_NOTE_MAX_CHARS.saturating_sub(100);
+        rotation_boundary_text(
+            &topic.chars().take(keep.min(120)).collect::<String>(),
+            old_session_id,
+            new_session_id,
+        )
+    } else {
+        text
+    };
+    store.add_memory_note(user_id, &text, Some(topic), "boundary")
+}
+
+fn memory_note_line(n: &MemoryNote) -> String {
+    match n.topic.as_deref() {
+        Some(t) => format!("- {} [{}]", n.text, t),
+        None => format!("- {}", n.text),
+    }
+}
+
+fn tool_memory_note(
+    store: &ChatStore,
+    user_id: &str,
+    args: &serde_json::Value,
+) -> ToolOutcome {
+    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if text.is_empty() {
+        return err("memory_note needs text (what should I remember?)");
+    }
+    if text.chars().count() > MEMORY_NOTE_MAX_CHARS {
+        return err(format!(
+            "note too long (max {MEMORY_NOTE_MAX_CHARS} chars per note; shorten it and call again)"
+        ));
+    }
+    let topic = args.get("topic").and_then(|v| v.as_str());
+    if topic.is_some_and(|t| t.trim().chars().count() > crate::chat::store::MEMORY_TOPIC_MAX_CHARS) {
+        return err(format!(
+            "topic too long (max {} chars; shorten it and call again)",
+            crate::chat::store::MEMORY_TOPIC_MAX_CHARS
+        ));
+    }
+    match store.add_memory_note(user_id, text, topic, "user") {
+        Ok(note) => {
+            // Audit trail (content-free): writes persist into every future
+            // turn, so each one leaves a diagnostics line. Titles carry
+            // no content (see title_for) and no Action row fires here —
+            // the purge tool records instead (destructive => visible).
+            crate::diagnostics::push(format!(
+                "memory: note saved (id={}, topic={}, len={})",
+                note.id,
+                note.topic.as_deref().unwrap_or("-"),
+                note.text.chars().count()
+            ));
+            ok("saved (local-only: this note never leaves the machine)")
+        }
+        Err(e) => err(format!("could not save the note: {e}")),
+    }
+}
+
+fn tool_memory_purge(store: &ChatStore, user_id: &str) -> ToolOutcome {
+    match store.delete_memory_notes_for_user(user_id) {
+        Ok(n) => {
+            crate::diagnostics::push(format!("memory: purged {n} note(s)"));
+            ok(format!("deleted {n} saved note(s); memory is empty now"))
+        }
+        Err(e) => err(format!("could not purge memory: {e}")),
+    }
+}
+
+fn tool_memory_recall(
+    store: &ChatStore,
+    user_id: &str,
+    args: &serde_json::Value,
+) -> ToolOutcome {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if query.is_empty() {
+        return err("memory_recall needs a query (keywords to search for)");
+    }
+    let notes = match store.list_memory_notes(user_id, MEMORY_LIST_CAP) {
+        Ok(n) => n,
+        Err(e) => return err(format!("could not search notes: {e}")),
+    };
+    let query_tokens = memory_tokens(query);
+    let mut scored: Vec<(usize, &MemoryNote)> = notes
+        .iter()
+        .map(|n| (note_score(n, &query_tokens), n))
+        .filter(|(s, _)| *s > 0)
+        .collect();
+    // Best overlap first; ties break newest-first (list order is stable).
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    if scored.is_empty() {
+        return ok("no saved notes match that");
+    }
+    ok(scored
+        .into_iter()
+        .take(MEMORY_RECALL_HITS)
+        .map(|(_, n)| memory_note_line(n))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn tool_memory_zoom(
+    store: &ChatStore,
+    user_id: &str,
+    provider_id: &str,
+    args: &serde_json::Value,
+) -> ToolOutcome {
+    let topic = args.get("topic").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if topic.is_empty() {
+        return err("memory_zoom needs a topic");
+    }
+    let notes = match store.memory_notes_for_topic(user_id, topic) {
+        Ok(n) => n,
+        Err(e) => return err(format!("could not read notes: {e}")),
+    };
+    if notes.is_empty() {
+        return ok(format!("no saved notes under '{topic}'"));
+    }
+    ok(merged_topic_view(&notes, provider_id).join("\n"))
+}
+
+/// Memory dispatch with the SHARED gates only (budget → policy → confirm):
+/// `memory_note` is Medium, so the existing Medium policy applies — no new
+/// gate was added anywhere (note insert needs no risky toggle; dry-run
+/// previews still gate the write via the standard preview path).
+fn execute_memory_tool(
+    store: &ChatStore,
+    user_id: &str,
+    provider_id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    policy: &Policy,
+    budget: &mut TurnBudget,
+) -> ToolOutcome {
+    let risk = match catalog().iter().find(|t| t.name == name) {
+        Some(d) => d.risk,
+        None => return err(format!("unknown tool: {name}")),
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // Memory calls are plain SQLite: no synthetic-input cooldown applies.
+    match budget.check_and_charge(name, risk, args, now_ms, true) {
+        Err(denied) => {
+            crate::diagnostics::push(format!("budget: {name} refused ({})", denied.message));
+            return err(denied.message);
+        }
+        Ok(Charge::Preview(title)) => return ok_preview(title),
+        Ok(Charge::Allow) => {}
+    }
+    if !policy.allows(risk) {
+        return err(
+            "blocked by policy (risky input is disabled; enable it in Settings → Control del PC or set HARNESS_ALLOW_RISKY=1); tell the user and stop",
+        );
+    }
+    if let Err(denied) = confirm_if_needed(policy, name, args) {
+        return denied;
+    }
+    match name {
+        "memory_note" => tool_memory_note(store, user_id, args),
+        "memory_recall" => tool_memory_recall(store, user_id, args),
+        "memory_zoom" => tool_memory_zoom(store, user_id, provider_id, args),
+        "memory_purge" => tool_memory_purge(store, user_id),
+        _ => err(format!("unknown tool: {name}")),
+    }
+}
+
+/// Bridge path: clone the installed turn context (short lock, never held
+/// across the store lock) and dispatch. Outside a turn there is no owner
+/// to scope notes to — fail closed, never global.
+fn execute_memory_routed(
+    name: &str,
+    args: &serde_json::Value,
+    policy: &Policy,
+    budget: &mut TurnBudget,
+) -> ToolOutcome {
+    let ctx = lock_slot()
+        .as_ref()
+        .map(|c| (std::sync::Arc::clone(&c.chat), c.user_id.clone(), c.provider_id.clone()));
+    let Some((chat, user_id, provider_id)) = ctx else {
+        return err("memory is unavailable outside a chat turn; tell the user and stop");
+    };
+    let store = match chat.lock() {
+        Ok(g) => g,
+        Err(_) => return err("memory is temporarily unavailable; tell the user and stop"),
+    };
+    execute_memory_tool(&store, &user_id, &provider_id, name, args, policy, budget)
+}
+
 pub async fn execute(
     name: &str,
     args: &serde_json::Value,
     policy: &Policy,
     budget: &mut TurnBudget,
 ) -> ToolOutcome {
+    // Memory tools (§3) dispatch through the turn-installed store context
+    // (see above): same budget/policy/confirm gates, no signature change.
+    if matches!(name, "memory_note" | "memory_recall" | "memory_zoom" | "memory_purge") {
+        return execute_memory_routed(name, args, policy, budget);
+    }
     let risk = match catalog().iter().find(|t| t.name == name) {
         Some(d) => d.risk,
         None => return err(format!("unknown tool: {name}")),
@@ -1670,5 +2080,323 @@ mod tests {
             !is_process_alive(&sys, pid),
             "spawned process should be gone"
         );
+    }
+
+    // -------------------------------------------------------------
+    // Memory layer (§3). The global turn slot is process-wide, so every
+    // test that routes through execute() holds MEM_CTX_SERIAL across
+    // install + calls. Pure-function tests (merge/wake/scoring) need no
+    // slot and stay parallel.
+    // -------------------------------------------------------------
+
+    static MEM_CTX_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_mem_ctx() -> std::sync::MutexGuard<'static, ()> {
+        MEM_CTX_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn mem_setup() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<crate::chat::store::ChatStore>>,
+        String,
+    ) {
+        use crate::auth::store::Store as AuthStore;
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "smartpc-test-mem-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = p.to_string_lossy().into_owned();
+        std::fs::remove_file(&path).ok();
+        let auth = AuthStore::open(&path).unwrap();
+        let user = auth
+            .create_user("u-mem", "mem@test.co", "hash", "2024-01-01T00:00:00Z")
+            .unwrap();
+        let chat = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::chat::store::ChatStore::open(&path).unwrap(),
+        ));
+        (path, chat, user.id)
+    }
+
+    fn mem_note(text: &str, topic: Option<&str>) -> crate::chat::store::MemoryNote {
+        crate::chat::store::MemoryNote {
+            id: "n".into(),
+            text: text.into(),
+            topic: topic.map(str::to_string),
+            source: "user".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_recall_precision_on_fixtures() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        for (text, topic) in [
+            ("el usuario prefiere firefox como navegador", Some("gustos")),
+            ("le gusta el té verde por las mañanas", Some("gustos")),
+            ("cita con el dentista el lunes a las diez", Some("salud")),
+        ] {
+            let out = execute(
+                "memory_note",
+                &serde_json::json!({"text": text, "topic": topic}),
+                &locked_down(),
+                &mut TurnBudget::new(false, "es"),
+            )
+            .await;
+            assert!(out.ok, "setup note failed: {}", out.output);
+        }
+        // Precision: only the firefox note matches.
+        let out = execute(
+            "memory_recall",
+            &serde_json::json!({"query": "navegador firefox"}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "recall failed: {}", out.output);
+        assert!(out.output.contains("firefox"), "{}", out.output);
+        assert!(!out.output.contains("dentista"), "{}", out.output);
+        assert!(!out.output.contains("té verde"), "{}", out.output);
+        // Miss: honest empty, never an error.
+        let out = execute(
+            "memory_recall",
+            &serde_json::json!({"query": "ornitorrinco cuántico"}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok);
+        assert!(out.output.contains("no saved notes match"), "{}", out.output);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn memory_zoom_walks_across_rotation_boundary() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        for text in ["decidido usar sqlite para notas", "esquema aplicado en el arranque"] {
+            let out = execute(
+                "memory_note",
+                &serde_json::json!({"text": text, "topic": "proyecto"}),
+                &locked_down(),
+                &mut TurnBudget::new(false, "es"),
+            )
+            .await;
+            assert!(out.ok, "{}", out.output);
+        }
+        // Rotation boundary note (what the W2 engine writes on rotate).
+        write_rotation_boundary_note(&chat.lock().unwrap(), &uid, "proyecto", "old-sess", "new-sess")
+            .expect("boundary note writes");
+        let out = execute(
+            "memory_zoom",
+            &serde_json::json!({"topic": "proyecto"}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "zoom failed: {}", out.output);
+        // Oldest-first walk: setup notes then the boundary continuation.
+        let sqlite = out.output.find("sqlite").unwrap();
+        let esquema = out.output.find("esquema").unwrap();
+        let boundary = out.output.find("continued in session new-sess").unwrap();
+        assert!(sqlite < esquema && esquema < boundary, "{}", out.output);
+        // Other topics stay out.
+        let out = execute(
+            "memory_zoom",
+            &serde_json::json!({"topic": "otro"}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok);
+        assert!(out.output.contains("no saved notes under"), "{}", out.output);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn memory_purge_wipes_user_scope_only() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        for text in ["nota uno", "nota dos"] {
+            let out = execute(
+                "memory_note",
+                &serde_json::json!({"text": text, "topic": "t"}),
+                &locked_down(),
+                &mut TurnBudget::new(false, "es"),
+            )
+            .await;
+            assert!(out.ok, "{}", out.output);
+        }
+        // Purge is High: denied locked-down (policy gate holds).
+        let denied = execute(
+            "memory_purge",
+            &serde_json::json!({}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(!denied.ok, "purge must be policy-gated");
+        // With the toggle on: wipe succeeds and recall goes empty.
+        let open = Policy { allow_risky: true };
+        let out = execute(
+            "memory_purge",
+            &serde_json::json!({}),
+            &open,
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "{}", out.output);
+        assert!(out.output.contains("2"), "{}", out.output);
+        let out = execute(
+            "memory_recall",
+            &serde_json::json!({"query": "nota"}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok);
+        assert!(out.output.contains("no saved notes match"), "{}", out.output);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn memory_topic_length_refuses_closed() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        let long_topic: String = "t".repeat(65);
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "nota", "topic": long_topic}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(!out.ok, "65-char topic must refuse");
+        assert!(out.output.contains("64"), "{}", out.output);
+        // Boundary: exactly 64 passes.
+        let ok_topic: String = "t".repeat(64);
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "nota", "topic": ok_topic}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "{}", out.output);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn memory_write_gated_without_new_toggle() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        // Medium rides the EXISTING policy: no risky toggle needed to
+        // write, and none was added (allows(Medium) with everything off).
+        assert!(Policy::for_user(false).requires_confirmation(Risk::Medium));
+        let open = Policy { allow_risky: false };
+        assert!(open.allows(Risk::Medium));
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "nota permitida"}),
+            &open,
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "Medium write must pass locked-down: {}", out.output);
+        // Dry-run preview (G3) gates the write: preview title, no row.
+        let mut dry = TurnBudget::new(true, "es");
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "nota previa"}),
+            &open,
+            &mut dry,
+        )
+        .await;
+        assert!(out.ok && out.preview, "preview must gate: {}", out.output);
+        assert!(out.output.starts_with("Vista previa:"), "{}", out.output);
+        let notes = chat.lock().unwrap().list_memory_notes(&uid, 10).unwrap();
+        assert_eq!(notes.len(), 1, "preview must not write");
+        assert_eq!(notes[0].text, "nota permitida");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn memory_note_caps_at_280_chars() {
+        let _serial = lock_mem_ctx();
+        let (path, chat, uid) = mem_setup();
+        let _guard = install_memory_ctx(&chat, &uid, "ollama");
+        // Exactly 280 writes; 281 refuses (fail closed, no truncation).
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "x".repeat(280)}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(out.ok, "280 chars must write: {}", out.output);
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "x".repeat(281)}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(!out.ok, "281 chars must refuse");
+        assert!(out.output.contains("280"), "{}", out.output);
+        // Empty text refuses too.
+        let out = execute(
+            "memory_note",
+            &serde_json::json!({"text": "   "}),
+            &locked_down(),
+            &mut TurnBudget::new(false, "es"),
+        )
+        .await;
+        assert!(!out.ok);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn memory_merge_caps_at_twelve_verbatim() {
+        // 13 notes → 12 lines: ONE merged head + 11 verbatim.
+        let notes: Vec<_> = (0..13).map(|i| mem_note(&format!("nota {i}"), Some("t"))).collect();
+        let view = merged_topic_view(&notes, "ollama");
+        assert_eq!(view.len(), MERGE_TOPIC_CAP);
+        assert!(view[0].starts_with("(merged 2 older notes)"), "{}", view[0]);
+        assert!(view[0].contains("nota 0"), "verbatim, not abstractive: {}", view[0]);
+        assert!(view[0].chars().count() <= 280);
+        assert_eq!(view[11], "nota 12");
+        // At cap: untouched.
+        let twelve: Vec<_> = (0..12).map(|i| mem_note(&format!("n{i}"), None)).collect();
+        assert_eq!(merged_topic_view(&twelve, "ollama").len(), 12);
+        // Gate defaults safe: no provider gets abstractive in v1.
+        for p in ["ollama", "llamacpp", "openai", "anthropic", ""] {
+            assert!(!provider_allows_abstractive(p), "{p} must default safe");
+        }
+    }
+
+    #[test]
+    fn memory_wake_scores_overlap_times_recency() {
+        let notes = vec![
+            mem_note("el usuario prefiere firefox", Some("gustos")),
+            mem_note("cita con el dentista", Some("salud")),
+        ];
+        // Newest-first input: dentista is newest but irrelevant here.
+        let newest_first = vec![notes[1].clone(), notes[0].clone()];
+        let wake = select_wake_notes(&newest_first, "abre el navegador firefox", 800);
+        assert_eq!(wake.len(), 1);
+        assert!(wake[0].text.contains("firefox"));
+        // No overlap → no prepend (clean prompt over noise).
+        assert!(select_wake_notes(&newest_first, "ornitorrinco cuántico", 800).is_empty());
+        // Char cap binds: plenty of overlap, tiny budget keeps the best.
+        let wake = select_wake_notes(&newest_first, "firefox dentista salud gustos", 20);
+        assert_eq!(wake.len(), 1);
     }
 }

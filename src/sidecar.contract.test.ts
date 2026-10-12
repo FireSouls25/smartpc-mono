@@ -860,6 +860,78 @@ describe("sidecar contract", () => {
     // the default 5 s test timeout. Assertions tolerate any outcome.
   }, 120000);
 
+  test("doc 14: session detail carries parent link; memory tools cataloged", async () => {
+    const tag = `m${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    // Fresh session: parent link present and null (roots stay roots).
+    const created = (await (
+      await fetch(`${BASE}/v1/chat/sessions`, {
+        method: "POST",
+        headers: authed,
+        body: JSON.stringify({ title: "hola" }),
+      })
+    ).json()) as { session: { id: string } };
+    const detail = (await (
+      await fetch(`${BASE}/v1/chat/sessions/${created.session.id}`, {
+        headers: authed,
+      })
+    ).json()) as { parent_session_id: string | null };
+    expect("parent_session_id" in detail).toBe(true);
+    expect(detail.parent_session_id).toBeNull();
+    // Memory tools ride the catalog with exact schemas (risk lives
+    // server-side; run's `rotated` flag is covered by Rust turn tests
+    // since asserting it needs a full live turn).
+    const tools = (await (
+      await fetch(`${BASE}/internal/pi/tools`, {
+        method: "POST",
+        headers: gate,
+      })
+    ).json()) as {
+      tools: {
+        name: string;
+        parameters: Record<string, unknown>;
+      }[];
+    };
+    const byName = new Map(tools.tools.map((t) => [t.name, t.parameters]));
+    const note = byName.get("memory_note") as {
+      required: string[];
+      properties: Record<string, { maxLength?: number }>;
+    };
+    expect(note.required).toEqual(["text"]);
+    expect(note.properties["text"]?.maxLength).toBe(280);
+    expect(note.properties["topic"]?.maxLength).toBe(64);
+    const recall = byName.get("memory_recall") as { required: string[] };
+    expect(recall.required).toEqual(["query"]);
+    const zoom = byName.get("memory_zoom") as { required: string[] };
+    expect(zoom.required).toEqual(["topic"]);
+    const purge = byName.get("memory_purge") as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+    expect(purge.required).toEqual([]);
+    expect(Object.keys(purge.properties)).toEqual([]);
+  });
+
   // Live audio only: needs the pi-listen engine + speakers. Excluded by
   // default; run with SMARTPC_TTS_LIVE=1 for the full ok-path proof
   // (response carries the resolved `model`).

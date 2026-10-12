@@ -6,11 +6,17 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   title       TEXT NOT NULL,
   provider    TEXT NOT NULL DEFAULT 'ollama',
   model       TEXT,
+  -- doc 14 §2 (rotation engine): successor row links to the frozen row it
+  -- continues. NULL for unrotated sessions. Old databases gain the column
+  -- via ChatStore::open's ALTER TABLE migration below.
+  parent_session_id TEXT NULL REFERENCES chat_sessions(id) ON DELETE SET NULL,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_sessions_user_idx
   ON chat_sessions (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS chat_sessions_parent_idx
+  ON chat_sessions (parent_session_id);
 
 CREATE TABLE IF NOT EXISTS chat_messages (
   id          TEXT PRIMARY KEY,
@@ -51,3 +57,20 @@ CREATE TABLE IF NOT EXISTS prefs (
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (user_id, key)
 );
+
+-- Wave 14 §3 (memory layer, v1: LOCAL-ONLY). Append-only note log mirroring
+-- the OptMem posture and our audit stance: NO delete endpoint, and these
+-- rows are NEVER synced to the cloud (export()/push_all must keep ignoring
+-- this table — see store.rs). Rotation boundary notes (source='boundary')
+-- let memory_zoom walk the session chain without any session-scoped column.
+CREATE TABLE IF NOT EXISTS memory_notes (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text        TEXT NOT NULL,
+  topic       TEXT,
+  source      TEXT NOT NULL DEFAULT 'user',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_notes_user_topic_idx
+  ON memory_notes (user_id, topic, created_at);

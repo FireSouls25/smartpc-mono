@@ -50,6 +50,9 @@ pub enum Job {
     Session {
         user_id: String,
         session: Session,
+        /// Rotation link, stamped at enqueue (the worker has no store).
+        /// None for roots and pre-rotation rows.
+        parent: Option<String>,
     },
     Messages {
         user_id: String,
@@ -95,13 +98,14 @@ impl Job {
 // Row payloads
 // ---------------------------------------------------------------------------
 
-pub fn session_json(user_id: &str, s: &Session) -> Value {
+pub fn session_json(user_id: &str, s: &Session, parent: Option<&str>) -> Value {
     json!({
         "id": s.id,
         "user_id": user_id,
         "title": s.title,
         "provider": s.provider,
         "model": s.model,
+        "parent_session_id": parent,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
     })
@@ -243,8 +247,8 @@ impl Cloud {
         let uid = job.user_id();
         let access = self.access_for(uid).ok_or(SyncError::NoToken)?;
         match job {
-            Job::Session { session, .. } => {
-                self.upsert(&access, "chat_sessions", session_json(uid, session))
+            Job::Session { session, parent, .. } => {
+                self.upsert(&access, "chat_sessions", session_json(uid, session, parent.as_deref()))
                     .await?;
             }
             Job::Messages {
@@ -289,7 +293,7 @@ impl Cloud {
         let mut offset = 0usize;
         loop {
             let url = format!(
-                "{}/chat_sessions?select=id,title,provider,model,created_at,updated_at,\
+                "{}/chat_sessions?select=id,title,provider,model,parent_session_id,created_at,updated_at,\
                  chat_messages(id,role,content,created_at),actions(id,kind,title,status,created_at,updated_at)\
                  &order=updated_at.desc&limit={page}&offset={offset}",
                 cfg.rest_root()
@@ -317,6 +321,11 @@ impl Cloud {
                     .map_err(|e| SyncError::Unreachable(format!("bad pull response: {e}")))?
             };
             let count = batch.len();
+            // Parents first: rotation children reference the frozen row
+            // via FK, and a child processed before its parent lands would
+            // skip this round (repaired next sync, but no reason to wait).
+            let mut batch = batch;
+            batch.sort_by(|a, b| a.created_at.cmp(&b.created_at));
             let guard = store
                 .lock()
                 .map_err(|e| SyncError::Unreachable(format!("local store busy: {e}")))?;
@@ -353,7 +362,14 @@ impl Cloud {
         .map_err(|e| SyncError::Unreachable(e.to_string()))?;
         let mut pushed = 0usize;
         for s in &export.sessions {
-            self.upsert(&access, "chat_sessions", session_json(uid, s))
+            // Parent link looked up fresh (the export snapshot predates it
+            // by design — Session stays rotation-agnostic per doc 14).
+            let parent = store
+                .lock()
+                .ok()
+                .and_then(|g| g.get_parent_session_id(&s.id, uid).ok())
+                .flatten();
+            self.upsert(&access, "chat_sessions", session_json(uid, s, parent.as_deref()))
                 .await?;
             pushed += 1;
         }
@@ -459,6 +475,9 @@ struct RemoteSession {
     provider: String,
     #[serde(default)]
     model: Option<String>,
+    /// Rotation link; absent on pre-rotation cloud rows (default None).
+    #[serde(default)]
+    parent_session_id: Option<String>,
     created_at: String,
     updated_at: String,
     #[serde(default)]
@@ -506,6 +525,7 @@ fn merge_session(store: &ChatStore, uid: &str, remote: &RemoteSession) -> rusqli
                 &remote.title,
                 provider,
                 remote.model.as_deref(),
+                remote.parent_session_id.as_deref(),
                 &created_at,
                 &updated_at,
             )?;
@@ -519,6 +539,7 @@ fn merge_session(store: &ChatStore, uid: &str, remote: &RemoteSession) -> rusqli
                     &remote.title,
                     provider,
                     remote.model.as_deref(),
+                    remote.parent_session_id.as_deref(),
                     &updated_at,
                 )?;
                 applied += 1;
@@ -590,6 +611,7 @@ mod tests {
             title: "From the cloud".into(),
             provider: "ollama".into(),
             model: None,
+            parent_session_id: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: updated.into(),
             chat_messages: vec![RemoteMessage {
@@ -619,6 +641,25 @@ mod tests {
         assert_eq!(merge_session(&chat, &uid, &remote).unwrap(), 0);
         assert_eq!(chat.list_messages("s1").unwrap().len(), 1);
         assert_eq!(chat.list_actions_by_session("s1").unwrap().len(), 1);
+        drop(chat);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn pull_carries_parent_session_link() {
+        let (path, store, uid) = store_with_user();
+        let chat = chat(&store);
+        // FK: the parent row must exist (ON DELETE SET NULL otherwise).
+        let parent = remote_session("parent", "2026-01-01T00:00:00Z");
+        assert_eq!(merge_session(&chat, &uid, &parent).unwrap(), 3);
+        let mut remote = remote_session("child", "2026-01-02T00:00:00Z");
+        remote.parent_session_id = Some("parent".into());
+        // Fixture reuses message/action ids (deduped: 1 for the row itself).
+        assert_eq!(merge_session(&chat, &uid, &remote).unwrap(), 1);
+        assert_eq!(
+            chat.get_parent_session_id("child", &uid).unwrap(),
+            Some("parent".to_string())
+        );
         drop(chat);
         std::fs::remove_file(&path).ok();
     }

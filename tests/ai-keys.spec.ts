@@ -9,7 +9,9 @@ test("opencode without key opens the key modal; bogus key errors", async ({
   page,
 }) => {
   await page.goto(APP, { waitUntil: "networkidle" });
-  await expect(page.getByText("Chats").first()).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Actividad").first()).toBeVisible({
+    timeout: 20000,
+  });
 
   const menus = page.locator("[data-selectmenu]");
   await menus.nth(0).getByRole("button").click();

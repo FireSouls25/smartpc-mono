@@ -5,10 +5,8 @@
   import { sessionStore as sessions } from "../domains/assistant/sessions.store.svelte";
   import { navigate, route, syncAuthRoute } from "./router.svelte";
   import TopBar from "./TopBar.svelte";
-  import ResizableRow from "./shell/ResizableRow.svelte";
   import EventsFeed from "../domains/assistant/EventsFeed.svelte";
   import CenterPanel from "../domains/assistant/CenterPanel.svelte";
-  import SessionsPane from "../domains/assistant/SessionsPane.svelte";
   import SettingsPage from "../domains/settings/SettingsPage.svelte";
   import ApiKeyModal from "../shared/ApiKeyModal.svelte";
   import { installVoiceHotkey } from "../domains/voice/voice.store.svelte";
@@ -65,17 +63,25 @@
     {/if}
     <TopBar onSettings={() => navigate("settings")} />
     {#if view() === "main"}
-      <ResizableRow>
-        {#snippet left()}
+      <!-- §14.1: main screen = chat + actions. History lives in
+        Settings → History (SessionsPane reused there, not here). -->
+      <div class="resizable-row" role="group" aria-label="Panels">
+        <section
+          class="pane pane-side"
+          style="--pw: 320px;"
+          data-testid="pane-a"
+          aria-label="Activity"
+        >
           <EventsFeed />
-        {/snippet}
-        {#snippet center()}
+        </section>
+        <section
+          class="pane pane-center"
+          data-testid="pane-b"
+          aria-label="Chat"
+        >
           <CenterPanel />
-        {/snippet}
-        {#snippet right()}
-          <SessionsPane />
-        {/snippet}
-      </ResizableRow>
+        </section>
+      </div>
     {:else}
       <div
         class="min-h-0 flex-1 lg:overflow-y-auto"

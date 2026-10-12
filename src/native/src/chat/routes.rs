@@ -57,9 +57,18 @@ fn push_session(state: &AppState, uid: &str, session: super::model::Session) {
     if !state.cloud.is_enabled() {
         return;
     }
+    // Stamp the rotation link at enqueue (the worker has no store).
+    // Best-effort: a failed lookup pushes parentless, never blocks local.
+    let parent = state
+        .chat
+        .lock()
+        .ok()
+        .and_then(|g| g.get_parent_session_id(&session.id, uid).ok())
+        .flatten();
     state.cloud.enqueue(Job::Session {
         user_id: uid.to_string(),
         session,
+        parent,
     });
 }
 
@@ -111,6 +120,73 @@ fn lock_chat(state: &AppState) -> Result<MutexGuard<'_, ChatStore>, Response> {
 
 fn non_empty(v: &Option<String>) -> Option<String> {
     v.clone().filter(|s| !s.trim().is_empty())
+}
+/// Short id form for diagnostics lines (full ids stay in the rows).
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+/// Rotation for the next send (doc 14 §2): consume the pending flag armed
+/// post-turn (`threshold`) or by a reactive path (`overflow`/`compaction`),
+/// freeze the old row, and open the linked successor the turn runs under.
+/// Returns (send_session_id, handoff, rotated). Runs BEFORE the new user
+/// message is stored — never mid-turn. Fail-open: any error keeps the
+/// current session (rotation is an optimization, never a reason to break
+/// a turn).
+fn rotate_for_send(
+    store: &ChatStore,
+    uid: &str,
+    session_id: &str,
+) -> (String, String, bool) {
+    let keep = || (session_id.to_string(), String::new(), false);
+    let reason = match store.take_pending_rotation(session_id) {
+        Some(r) => r,
+        None => return keep(),
+    };
+    let old = match store.get_session(session_id, uid) {
+        Ok(Some(sess)) => sess,
+        _ => return keep(),
+    };
+    // Verbatim excerpts of the frozen row (tool turns excluded: audit, not
+    // conversation). Wake notes ride the per-turn wake channel on the fresh
+    // turn itself, so none are folded in here (no duplication).
+    // Owner-scoped read: a bare session id must never cross user scopes.
+    let pairs: Vec<(String, String)> = store
+        .list_messages_owned(session_id, uid)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| (m.role, m.content))
+        .collect();
+    let handoff = crate::pi::turn::build_handoff(&pairs, "");
+    let child = match store.create_child_session(
+        uid,
+        &old.title,
+        &old.provider,
+        old.model.as_deref(),
+        session_id,
+    ) {
+        Ok(c) => c,
+        Err(_) => return keep(),
+    };
+    let line = format!(
+        "[rotation] old={} new={} reason={}",
+        short_id(session_id),
+        short_id(&child.id),
+        reason,
+    );
+    eprintln!("{line}");
+    crate::diagnostics::push(line);
+    // Boundary note so memory_zoom walks the chain across the rotation.
+    // Best-effort: a failed write must never fail the rotation itself.
+    // Topic is the frozen row's title (what the user called it).
+    let _ = crate::harness::exec::write_rotation_boundary_note(
+        store,
+        uid,
+        &old.title,
+        session_id,
+        &child.id,
+    );
+    (child.id, handoff, true)
 }
 fn title_of(message: &str) -> String {
     let t: String = message
@@ -335,6 +411,14 @@ pub async fn chat(
         }
     };
 
+    // Rotation (doc 14 §2): a pending flag from the post-turn threshold
+    // check or a reactive path rotates NOW — before the new user message
+    // is stored — never mid-turn. The turn below runs on the successor row.
+    let (session_id, handoff, pre_rotated) = match lock_chat(&s) {
+        Ok(store) => rotate_for_send(&store, &uid, &session_id),
+        Err(r) => return r,
+    };
+
     // Store the user message. The lock is released before any await.
     // Session affinity: Zen routes per conversation id.
     agent.set_session_id(Some(session_id.clone()));
@@ -353,7 +437,7 @@ pub async fn chat(
     // never carried a language: default like everywhere. Plain chat never
     // previews (no preview flag on ChatBody).
     let done = match pi_chat_turn(
-        &s, &uid, &session_id, &prov_name, &model_name, &message, "es", false,
+        &s, &uid, &session_id, &prov_name, &model_name, &message, "es", false, handoff,
     )
     .await
     {
@@ -364,7 +448,10 @@ pub async fn chat(
         StatusCode::OK,
         Json(serde_json::json!({
             "reply": done.reply, "model": model_name,
-            "provider": prov_name, "session_id": session_id,
+            "provider": prov_name, "session_id": done.session_id,
+            // Additive rotation signal (no PROTOCOL bump): the renderer
+            // shows the divider chip on true, clears it on the next send.
+            "rotated": pre_rotated || done.rotated,
         })),
     )
         .into_response()
@@ -560,9 +647,12 @@ pub async fn get_session(
     };
     let messages = store.list_messages(&id).unwrap_or_default();
     let actions = store.list_actions_by_session(&id).unwrap_or_default();
+    // Rotation chain link (doc 14 §2: additive detail field, no PROTOCOL
+    // bump): the frozen session this row continues, if any.
+    let parent = store.get_parent_session_id(&id, &uid).unwrap_or(None);
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "session": session, "messages": messages, "actions": actions })),
+        Json(serde_json::json!({ "session": session, "parent_session_id": parent, "messages": messages, "actions": actions })),
     )
         .into_response()
 }
@@ -843,6 +933,13 @@ pub async fn run(
         }
     };
 
+    // Rotation (doc 14 §2): same pre-send rotation as `chat` — the pending
+    // flag rotates NOW, before the new user message is stored.
+    let (session_id, handoff, pre_rotated) = match lock_chat(&s) {
+        Ok(store) => rotate_for_send(&store, &uid, &session_id),
+        Err(r) => return r,
+    };
+
     // Session affinity: Zen routes per conversation id (MissingSessionID
     // without it). The provider forwards it as `x-opencode-session`.
     agent.set_session_id(Some(session_id.clone()));
@@ -866,7 +963,7 @@ pub async fn run(
     let ctx_window = agent.context_window();
     let dry_run = b.preview.unwrap_or(false);
     let done = match pi_chat_turn(
-        &s, &uid, &session_id, &prov_name, &model, &message, lang, dry_run,
+        &s, &uid, &session_id, &prov_name, &model, &message, lang, dry_run, handoff,
     )
     .await
     {
@@ -877,8 +974,11 @@ pub async fn run(
         StatusCode::OK,
         Json(serde_json::json!({
             "reply": done.reply, "model": model, "provider": prov_name,
-            "session_id": session_id, "steps": done.steps,
+            "session_id": done.session_id, "steps": done.steps,
             "context": { "used_tokens": done.used_tokens, "window": done.window.or(ctx_window) },
+            // Additive rotation signal (no PROTOCOL bump): the renderer
+            // shows the divider chip on true, clears it on the next send.
+            "rotated": pre_rotated || done.rotated,
         })),
     )
         .into_response()
@@ -893,6 +993,11 @@ struct PiTurnDone {
     steps: Vec<crate::harness::tools::TraceStep>,
     used_tokens: u32,
     window: Option<u32>,
+    /// Session that actually ran the turn (the successor after an overflow
+    /// auto-retry; otherwise the send session).
+    session_id: String,
+    /// True when this turn ran under a fresh rotated session.
+    rotated: bool,
 }
 
 fn pi_error(e: &crate::pi::supervisor::PiError) -> Response {
@@ -919,6 +1024,7 @@ async fn pi_chat_turn(
     message: &str,
     lang: &str,
     dry_run: bool,
+    handoff: String,
 ) -> Result<PiTurnDone, Response> {
     use crate::pi::turn::{run_turn, TurnInput};
     // Safety net matching turn_provider's gate: non-loopback providers need
@@ -959,24 +1065,71 @@ async fn pi_chat_turn(
             .unwrap_or_else(|| title_of(message)),
         Err(_) => title_of(message),
     };
-    let out = run_turn(
-        &s.pi,
-        &s.chat,
-        TurnInput {
-            user_id: uid.to_string(),
-            chat_session_id: session_id.to_string(),
-            session_title: title,
-            provider: prov_name.to_string(),
-            model: model.to_string(),
-            message: full_message,
-            dry_run,
-            lang: lang.to_string(),
-        },
-    )
-    .await
-    .map_err(|e| pi_error(&e))?;
+    let make_input = |chat_session_id: &str, handoff: String| TurnInput {
+        user_id: uid.to_string(),
+        chat_session_id: chat_session_id.to_string(),
+        session_title: title.clone(),
+        provider: prov_name.to_string(),
+        model: model.to_string(),
+        message: full_message.clone(),
+        handoff,
+        dry_run,
+        lang: lang.to_string(),
+    };
+    let first = run_turn(&s.pi, &s.chat, make_input(session_id, handoff.clone())).await;
+    // Reactive path (doc 14 §2): a turn that DIES to context overflow
+    // auto-retries ONCE under a fresh linked session (cap 1, then the
+    // honest error). The dead turn's user message stays in the frozen row
+    // and the handoff below carries it verbatim, so nothing is lost.
+    let (out, final_session, rotated) = match first {
+        Ok(o) => (o, session_id.to_string(), false),
+        Err(e) if crate::pi::turn::is_overflow_error(&e) => {
+            // Arm first: if the retry ALSO dies, the next send still
+            // rotates instead of hitting the same wall.
+            if let Ok(store) = lock_chat(s) {
+                store.mark_pending_rotation(session_id, "overflow");
+            }
+            let (retry_session, retry_handoff) =
+                match lock_chat(s) {
+                    Ok(store) => {
+                        let (id, h, _) = rotate_for_send(&store, uid, session_id);
+                        (id, h)
+                    }
+                    Err(_) => return Err(pi_error(&e)),
+                };
+            if retry_session == session_id {
+                // Rotation unavailable (store error): honest error now.
+                return Err(pi_error(&e));
+            }
+            // The pre-send handoff (if any) covers the grandparent row;
+            // the retry handoff covers the frozen row including this
+            // turn's user message. Carry both, oldest first — re-capped
+            // to HANDOFF_CHARS (most-recent wins) so the retry cannot
+            // double the handoff budget.
+            let combined = if handoff.trim().is_empty() {
+                retry_handoff
+            } else if retry_handoff.trim().is_empty() {
+                handoff
+            } else {
+                format!("{}\n---\n{}", handoff.trim(), retry_handoff.trim())
+            };
+            let cap = crate::pi::turn::handoff_chars();
+            let combined = if cap > 0 && combined.chars().count() > cap {
+                combined.chars().skip(combined.chars().count() - cap).collect()
+            } else {
+                combined
+            };
+            match run_turn(&s.pi, &s.chat, make_input(&retry_session, combined)).await {
+                Ok(o) => (o, retry_session, true),
+                Err(e2) => return Err(pi_error(&e2)),
+            }
+        }
+        Err(e) => return Err(pi_error(&e)),
+    };
     // Persist tool turns BEFORE the final reply (same ordering rule as the
-    // native path: the next run sees what was actually executed).
+    // native path: the next run sees what was actually executed). All rows
+    // land in the session that actually ran the turn (the successor after
+    // an overflow auto-retry).
     {
         let store = lock_chat(s).map_err(|r| r)?;
         let mut written: Vec<super::model::ChatMessageRow> = Vec::new();
@@ -985,7 +1138,7 @@ async fn pi_chat_turn(
                 "tool": st.tool, "ok": st.ok, "output": st.output_preview,
             })
             .to_string();
-            match store.add_message(session_id, "tool", &content) {
+            match store.add_message(&final_session, "tool", &content) {
                 Ok(row) => written.push(row),
                 Err(_) => {
                     return Err((
@@ -996,7 +1149,7 @@ async fn pi_chat_turn(
                 }
             }
         }
-        match store.add_message(session_id, "assistant", &out.reply) {
+        match store.add_message(&final_session, "assistant", &out.reply) {
             Ok(row) => written.push(row),
             Err(_) => {
                 return Err((
@@ -1006,18 +1159,39 @@ async fn pi_chat_turn(
                     .into_response());
             }
         }
-        let touched = store.touch_session(session_id, prov_name, Some(model));
+        let touched = store.touch_session(&final_session, prov_name, Some(model));
+        // Post-turn threshold evaluation (doc 14 §2): `used/window` comes
+        // from get_session_stats (already read above); the estimate keeps
+        // the meter honest when pi reports no usage. No known window → no
+        // arming (never rotate on a guess). The flag fires on the NEXT
+        // send — never mid-turn.
+        if let Some(w) = out.window {
+            let used = out.used_tokens.unwrap_or(est_used);
+            if crate::pi::turn::should_rotate(
+                used,
+                w,
+                store.count_user_turns(&final_session).unwrap_or(0),
+            ) {
+                store.mark_pending_rotation(&final_session, "threshold");
+                crate::diagnostics::push(format!(
+                    "[rotation] session={} armed reason=threshold used={} window={}",
+                    short_id(&final_session),
+                    used,
+                    w,
+                ));
+            }
+        }
         drop(store);
         // Mirror the whole turn in one queue job: ordered after everything
         // this turn wrote, and a single network round-trip per message.
-        push_messages(s, uid, session_id, written);
+        push_messages(s, uid, &final_session, written);
         if let Ok(session) = touched {
             push_session(s, uid, session);
         }
     }
     let run_line = format!(
-        "[pi-run] session={} provider={} model={} steps={} calls={:?}",
-        session_id.chars().take(8).collect::<String>(),
+        "[pi-run] session={} provider={} model={} steps={} calls={:?} rotated={}",
+        short_id(&final_session),
         prov_name,
         model,
         out.steps.len(),
@@ -1027,15 +1201,20 @@ async fn pi_chat_turn(
                 // T2 P0-a(4): the query string is dropped everywhere, not
                 // truncated — the generic arg dump would leak it (the args
                 // carry the raw URL, so open_url steps log the redacted
-                // host+path form instead).
+                // host+path form instead). Memory tools likewise log only
+                // their content-free title (note text must never reach
+                // stderr/diagnostics).
                 let args: String = if t.tool == "open_url" {
                     crate::harness::tools::short_link(&t.args)
+                } else if t.tool.starts_with("memory_") {
+                    crate::harness::tools::title_for(&t.tool, &t.args)
                 } else {
                     t.args.to_string().chars().take(80).collect()
                 };
                 format!("{}:{}:{}", t.tool, t.ok, args)
             })
             .collect::<Vec<_>>(),
+        rotated,
     );
     eprintln!("{run_line}");
     crate::diagnostics::push(run_line);
@@ -1044,6 +1223,8 @@ async fn pi_chat_turn(
         steps: out.steps,
         used_tokens: out.used_tokens.unwrap_or(est_used),
         window: out.window,
+        session_id: final_session,
+        rotated,
     })
 }
 

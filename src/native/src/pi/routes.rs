@@ -49,6 +49,31 @@ pub fn reset_turn_budget(pi_session: &str, dry_run: bool, lang: &str) {
     }
 }
 
+/// Copy-on-rotate: a fresh pi file minted for a rotation child (or an
+/// overflow retry) inherits the parent file's session counters and abort
+/// flag, so rotation can never reset the per-session mutating/typing
+/// caps. Never overwrites a live entry (same-key and existing-target
+/// calls are no-ops); call BEFORE `reset_turn_budget`, which then sets
+/// the turn fields while keeping the carried session caps.
+pub fn carry_session_budget(from_pi: &str, to_pi: &str) {
+    if from_pi == to_pi {
+        return;
+    }
+    if let Ok(mut map) = budgets().lock() {
+        if map.contains_key(to_pi) {
+            return;
+        }
+        let mut fresh = TurnBudget::new(false, "");
+        if let Some(src) = map.get(from_pi) {
+            fresh.carry_from(src);
+            crate::diagnostics::push(
+                "budget: carried session caps across rotation".to_string(),
+            );
+        }
+        map.insert(to_pi.to_string(), fresh);
+    }
+}
+
 pub async fn tools(State(_s): State<AppState>) -> impl IntoResponse {
     let tools: Vec<serde_json::Value> = crate::harness::tools::catalog()
         .iter()
@@ -181,4 +206,49 @@ pub async fn tool(
     }
     Json(serde_json::json!({ "ok": outcome.ok, "output": outcome.output, "preview": outcome.preview }))
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Copy-on-rotate: a fresh pi file inherits the old file's session
+    /// counters (and never overwrites a live entry).
+    #[test]
+    fn carry_session_budget_moves_session_caps() {
+        // Unique keys per process (BUDGETS is process-global).
+        let from = format!("test-carry-from-{}", std::process::id());
+        let to = format!("test-carry-to-{}", std::process::id());
+        reset_turn_budget(&from, false, "es");
+        {
+            let mut map = budgets().lock().unwrap();
+            let b = map.get_mut(&from).unwrap();
+            b.session.mutating_calls = 41;
+            b.session.typed_chars = 2000;
+        }
+        carry_session_budget(&from, &to);
+        {
+            let map = budgets().lock().unwrap();
+            let carried = map.get(&to).expect("fresh key gets the carried caps");
+            assert_eq!(carried.session.mutating_calls, 41);
+            assert_eq!(carried.session.typed_chars, 2000);
+        }
+        // Never overwrites a live entry: a second carry is a no-op.
+        {
+            let mut map = budgets().lock().unwrap();
+            map.get_mut(&to).unwrap().session.mutating_calls = 7;
+        }
+        carry_session_budget(&from, &to);
+        {
+            let map = budgets().lock().unwrap();
+            assert_eq!(map.get(&to).unwrap().session.mutating_calls, 7);
+        }
+        // Same-key carry is a no-op (never self-clobbers).
+        carry_session_budget(&from, &from);
+        {
+            let mut map = budgets().lock().unwrap();
+            map.remove(&from);
+            map.remove(&to);
+        }
+    }
 }

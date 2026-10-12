@@ -27,6 +27,10 @@ pub struct TurnInput {
     pub model: String,
     /// Full user content: fresh machine context + message (+ turn reminder).
     pub message: String,
+    /// Rotation handoff (doc 14 §2): verbatim excerpts of the frozen
+    /// session, prepended to THIS prompt only — never stored. Empty for
+    /// unrotated turns.
+    pub handoff: String,
     /// `POST /v1/ai/run {preview:true}` (T4 G3): Medium/High tools answer
     /// with a preview title, no side effect, no Action row.
     pub dry_run: bool,
@@ -93,8 +97,180 @@ fn preview(s: &str) -> String {
     }
 }
 
-fn records_action(tool: &str) -> bool {
-    crate::harness::tools::catalog()
+// ---------------------------------------------------------------------
+// Rotation engine (doc 14 §§2+4). Deterministic, zero-LLM: no abstractive
+// summarization anywhere (small-model safety). Thresholds are constants
+// with env overrides; a session needs ≥ 2 user turns before it is
+// eligible; rotation never happens mid-turn (the pending flag is armed
+// post-turn and consumed on the NEXT send).
+// ---------------------------------------------------------------------
+
+/// Fraction of the context window that arms a rotation for the next send.
+/// `SMARTPC_ROTATE_AT`, default 0.75 (leaves room for one big final turn:
+/// an agentic turn is MULTIPLE LLM calls in the tool loop).
+ pub fn rotate_at() -> f64 {
+    match std::env::var("SMARTPC_ROTATE_AT")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
+        Some(f) if f.is_finite() && f > 0.0 && f <= 1.0 => f,
+        _ => 0.75,
+    }
+}
+
+/// Verbatim turns carried across a rotation. `SMARTPC_HANDOFF_TURNS`.
+ pub fn handoff_turns() -> usize {
+    match std::env::var("SMARTPC_HANDOFF_TURNS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => n,
+        _ => 3,
+    }
+}
+
+/// Char cap for the verbatim transcript portion of the handoff.
+/// `SMARTPC_HANDOFF_CHARS`.
+ pub fn handoff_chars() -> usize {
+    match std::env::var("SMARTPC_HANDOFF_CHARS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(n) if n > 0 => n,
+        _ => 3000,
+    }
+}
+
+/// Post-turn eligibility: `used/window ≥ ROTATE_AT` AND ≥ 2 user turns.
+/// The boundary is inclusive (0.75 exactly arms). A missing window
+/// (`window == 0`) never arms — without a known window there is no honest
+/// fraction to evaluate.
+ pub fn should_rotate_at(used: u32, window: u32, user_turns: usize, rotate_at: f64) -> bool {
+    if user_turns < 2 || window == 0 || !rotate_at.is_finite() || rotate_at <= 0.0 {
+        return false;
+    }
+    used as f64 / window as f64 >= rotate_at
+}
+
+/// [`should_rotate_at`] with the live (env-overridable) threshold.
+ pub fn should_rotate(used: u32, window: u32, user_turns: usize) -> bool {
+    should_rotate_at(used, window, user_turns, rotate_at())
+}
+
+/// Reactive path (doc 14 §2): did this turn die to context overflow?
+/// Matches the provider/pi phrasing for an exhausted window — only
+/// `Rpc`/`TurnFailed` carry upstream text; timeouts, cancels and
+/// unavailable children are never overflow.
+ pub fn is_overflow_error(e: &PiError) -> bool {
+    let msg = match e {
+        PiError::Rpc(m) | PiError::TurnFailed(m) => m.to_lowercase(),
+        _ => return false,
+    };
+    [
+        "context length",
+        "context_length",
+        "context overflow",
+        "context window",
+        "token limit",
+        "too many tokens",
+        "max tokens",
+        "maximum context",
+        "out of context",
+        "overflow",
+    ]
+    .iter()
+    .any(|needle| msg.contains(needle))
+}
+
+/// Deterministic handoff builder: the last `max_turns` user→assistant turns
+/// verbatim (oldest first), transcript capped at `max_chars` chars keeping
+/// the MOST recent content, then current wake notes (memory layer, doc 14
+/// §3 — empty in v1 until that wave lands). Tool turns are audit, not
+/// conversation, so callers filter to user/assistant pairs before calling.
+/// Rides the ephemeral prepend channel ([`TurnInput::handoff`]) — never stored.
+ pub fn build_handoff_capped(
+    messages: &[(String, String)],
+    wake_notes: &str,
+    max_turns: usize,
+    max_chars: usize,
+) -> String {
+    struct Turn {
+        user: String,
+        assistant: Vec<String>,
+    }
+    let mut turns: Vec<Turn> = Vec::new();
+    for (role, content) in messages {
+        if role == "user" {
+            turns.push(Turn {
+                user: content.clone(),
+                assistant: Vec::new(),
+            });
+        } else if role == "assistant" {
+            match turns.last_mut() {
+                Some(t) => t.assistant.push(content.clone()),
+                // Orphan assistant (no user turn yet): keep it verbatim
+                // rather than dropping conversation content.
+                None => turns.push(Turn {
+                    user: String::new(),
+                    assistant: vec![content.clone()],
+                }),
+            }
+        }
+    }
+    let render = |t: &Turn| -> String {
+        if t.user.is_empty() {
+            format!("assistant: {}", t.assistant.join("\n"))
+        } else if t.assistant.is_empty() {
+            format!("user: {}", t.user)
+        } else {
+            format!("user: {}\nassistant: {}", t.user, t.assistant.join("\n"))
+        }
+    };
+    // Newest-first accumulation: the cap always keeps the most recent
+    // turns, and a single over-long turn keeps its tail.
+    let mut kept: Vec<String> = Vec::new();
+    let mut len: usize = 0;
+    for t in turns.iter().rev().take(max_turns) {
+        let rendered = render(t);
+        let n = rendered.chars().count();
+        if kept.is_empty() && n > max_chars && max_chars > 0 {
+            let tail: String = rendered
+                .chars()
+                .skip(n - max_chars)
+                .collect();
+            kept.push(tail);
+            break;
+        }
+        let sep = if kept.is_empty() { 0 } else { "\n---\n".chars().count() };
+        if len + sep + n > max_chars {
+            break;
+        }
+        len += sep + n;
+        kept.push(rendered);
+    }
+    kept.reverse();
+    let mut out = kept.join("\n---\n");
+    // Wake rides capped too: callers pass the already-capped 800-char
+    // selection, but this function must not trust that — truncate here
+    // so no future caller can blow the handoff budget through this arg.
+    let wake: String = wake_notes.trim().chars().take(max_chars / 2).collect();
+    let wake = wake.trim();
+    if !wake.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n");
+        }
+        out.push_str("[current notes]\n");
+        out.push_str(wake);
+    }
+    out
+}
+
+/// [`build_handoff_capped`] with the live (env-overridable) caps.
+ pub fn build_handoff(messages: &[(String, String)], wake_notes: &str) -> String {
+    build_handoff_capped(messages, wake_notes, handoff_turns(), handoff_chars())
+}
+
+fn records_action(tool: &str) -> bool {    crate::harness::tools::catalog()
         .iter()
         .find(|t| t.name == tool)
         .is_some_and(|t| t.records_action)
@@ -251,6 +427,180 @@ mod tests {
         assert_eq!(text_of_result(&v), "hello world");
         assert_eq!(text_of_result(&serde_json::json!({})), "");
     }
+
+    // Rotation engine (doc 14 §§2+4): threshold math including the
+    // inclusive 0.75 boundary, the 2-turn minimum, and the unknown-window
+    // fail-closed rule.
+    #[test]
+    fn rotation_threshold_math() {
+        // Boundary inclusive: exactly 0.75 arms.
+        assert!(should_rotate_at(7500, 10_000, 2, 0.75));
+        assert!(should_rotate_at(7501, 10_000, 2, 0.75));
+        // Just under: no rotation.
+        assert!(!should_rotate_at(7499, 10_000, 2, 0.75));
+        assert!(!should_rotate_at(100, 10_000, 50, 0.75));
+        // Minimum 2 user turns before eligible (first-turn overflow
+        // surfaces honestly — nothing to hand off yet).
+        assert!(!should_rotate_at(9500, 10_000, 0, 0.75));
+        assert!(!should_rotate_at(9500, 10_000, 1, 0.75));
+        assert!(should_rotate_at(9500, 10_000, 2, 0.75));
+        // Unknown window: never arm on a guess.
+        assert!(!should_rotate_at(9999, 0, 10, 0.75));
+        // Degenerate thresholds fail closed.
+        assert!(!should_rotate_at(9999, 10_000, 10, f64::NAN));
+        assert!(!should_rotate_at(9999, 10_000, 10, 0.0));
+        // Live wrapper honors the default when the env is unset/invalid.
+        // (Single test mutates process env — kept together, restored after.)
+        let saved = std::env::var("SMARTPC_ROTATE_AT").ok();
+        std::env::remove_var("SMARTPC_ROTATE_AT");
+        assert_eq!(rotate_at(), 0.75);
+        assert!(should_rotate(7500, 10_000, 2));
+        std::env::set_var("SMARTPC_ROTATE_AT", "0.5");
+        assert_eq!(rotate_at(), 0.5);
+        assert!(should_rotate(5000, 10_000, 2));
+        assert!(!should_rotate(4999, 10_000, 2));
+        std::env::set_var("SMARTPC_ROTATE_AT", "nonsense");
+        assert_eq!(rotate_at(), 0.75);
+        std::env::set_var("SMARTPC_ROTATE_AT", "7");
+        assert_eq!(rotate_at(), 0.75);
+        match saved {
+            Some(v) => std::env::set_var("SMARTPC_ROTATE_AT", v),
+            None => std::env::remove_var("SMARTPC_ROTATE_AT"),
+        }
+        let saved_t = std::env::var("SMARTPC_HANDOFF_TURNS").ok();
+        let saved_c = std::env::var("SMARTPC_HANDOFF_CHARS").ok();
+        std::env::remove_var("SMARTPC_HANDOFF_TURNS");
+        std::env::remove_var("SMARTPC_HANDOFF_CHARS");
+        assert_eq!(handoff_turns(), 3);
+        assert_eq!(handoff_chars(), 3000);
+        std::env::set_var("SMARTPC_HANDOFF_TURNS", "5");
+        std::env::set_var("SMARTPC_HANDOFF_CHARS", "100");
+        assert_eq!(handoff_turns(), 5);
+        assert_eq!(handoff_chars(), 100);
+        std::env::set_var("SMARTPC_HANDOFF_TURNS", "0");
+        std::env::set_var("SMARTPC_HANDOFF_CHARS", "-x");
+        assert_eq!(handoff_turns(), 3);
+        assert_eq!(handoff_chars(), 3000);
+        match saved_t {
+            Some(v) => std::env::set_var("SMARTPC_HANDOFF_TURNS", v),
+            None => std::env::remove_var("SMARTPC_HANDOFF_TURNS"),
+        }
+        match saved_c {
+            Some(v) => std::env::set_var("SMARTPC_HANDOFF_CHARS", v),
+            None => std::env::remove_var("SMARTPC_HANDOFF_CHARS"),
+        }
+    }
+
+    fn convo(n: usize) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        for i in 0..n {
+            v.push(("user".to_string(), format!("question {i}")));
+            v.push(("assistant".to_string(), format!("answer {i}")));
+        }
+        v
+    }
+
+    // Handoff caps: at most 3 turns, transcript at most 3000 chars,
+    // most-recent content wins, verbatim (zero-LLM, no summarization).
+    #[test]
+    fn handoff_keeps_last_three_turns_verbatim() {
+        let msgs = convo(5);
+        let h = build_handoff_capped(&msgs, "", 3, 3000);
+        // Turns 2..4 survive verbatim; 0..1 are dropped.
+        for i in 2..5 {
+            assert!(h.contains(&format!("question {i}")), "{h}");
+            assert!(h.contains(&format!("answer {i}")), "{h}");
+        }
+        assert!(!h.contains("question 0"), "{h}");
+        assert!(!h.contains("answer 1"), "{h}");
+        // Oldest first (the model reads a continuous excerpt).
+        assert!(h.find("question 2") < h.find("question 4"), "{h}");
+        // Live wrapper defaults agree.
+        let saved_t = std::env::var("SMARTPC_HANDOFF_TURNS").ok();
+        let saved_c = std::env::var("SMARTPC_HANDOFF_CHARS").ok();
+        std::env::remove_var("SMARTPC_HANDOFF_TURNS");
+        std::env::remove_var("SMARTPC_HANDOFF_CHARS");
+        assert_eq!(build_handoff(&msgs, ""), h);
+        match saved_t {
+            Some(v) => std::env::set_var("SMARTPC_HANDOFF_TURNS", v),
+            None => std::env::remove_var("SMARTPC_HANDOFF_TURNS"),
+        }
+        match saved_c {
+            Some(v) => std::env::set_var("SMARTPC_HANDOFF_CHARS", v),
+            None => std::env::remove_var("SMARTPC_HANDOFF_CHARS"),
+        }
+    }
+
+    #[test]
+    fn handoff_char_cap_keeps_most_recent_content() {
+        // Turn 1 renders to ~2980 chars; with the newest turn + separator
+        // it no longer fits 3000, so the oldest content gives way.
+        let big = "x".repeat(2950);
+        let msgs = vec![
+            ("user".to_string(), "old question".to_string()),
+            ("assistant".to_string(), big),
+            ("user".to_string(), "new question".to_string()),
+            ("assistant".to_string(), "new answer".to_string()),
+        ];
+        let h = build_handoff_capped(&msgs, "", 3, 3000);
+        assert!(h.chars().count() <= 3000, "len={}", h.chars().count());
+        // Newest turn intact; oldest content gave way to the cap.
+        assert!(h.contains("new question"), "{h}");
+        assert!(h.contains("new answer"), "{h}");
+        assert!(!h.contains("old question"), "{h}");
+        // A single over-long turn keeps its tail, verbatim.
+        let solo = vec![("assistant".to_string(), "y".repeat(5000))];
+        let h = build_handoff_capped(&solo, "", 3, 3000);
+        assert_eq!(h.chars().count(), 3000);
+        assert_eq!(h, "y".repeat(3000));
+    }
+
+    #[test]
+    fn handoff_folds_in_wake_notes_and_ignores_tool_turns() {
+        let msgs = vec![
+            ("user".to_string(), "q".to_string()),
+            ("tool".to_string(), r#"{"tool":"open_app"}"#.to_string()),
+            ("assistant".to_string(), "a".to_string()),
+        ];
+        let h = build_handoff_capped(&msgs, "prefiere español", 3, 3000);
+        assert!(h.contains("user: q"), "{h}");
+        assert!(h.contains("assistant: a"), "{h}");
+        assert!(!h.contains("open_app"), "{h}");
+        assert!(h.contains("[current notes]"), "{h}");
+        assert!(h.contains("prefiere español"), "{h}");
+        // Empty transcript + empty wake = empty handoff (no prepend).
+        assert_eq!(build_handoff_capped(&[], "  ", 3, 3000), "");
+    }
+
+    // Reactive path classification: overflow phrasing arms/retries, while
+    // timeouts, cancels and unavailable children never do.
+    #[test]
+    fn overflow_detection() {
+        for msg in [
+            "pi: context length exceeded (128k)",
+            "REQUEST TOKEN LIMIT context_length_exceeded",
+            "Conversation exceeds the context window",
+            "too many tokens for this model (max tokens 4096)",
+            "Context overflow: please start a new session",
+            "maximum context reached",
+            "model ran out of context",
+        ] {
+            assert!(
+                is_overflow_error(&PiError::TurnFailed(msg.to_string())),
+                "{msg}"
+            );
+            assert!(is_overflow_error(&PiError::Rpc(msg.to_string())), "{msg}");
+        }
+        for e in [
+            PiError::Timeout,
+            PiError::Cancelled,
+            PiError::Unavailable("pi binary missing".to_string()),
+            PiError::TurnFailed("pi settled with no assistant text".to_string()),
+            PiError::Rpc("response channel dropped".to_string()),
+        ] {
+            assert!(!is_overflow_error(&e), "{e:?}");
+        }
+    }
 }
 
 async fn cmd(
@@ -357,7 +707,55 @@ async fn run_turn_inner(
     .await?;
     // Fresh per-turn counters (session caps carry over); the bridge charges
     // every tool call against this until the next turn.
+    // Copy-on-rotate: a fresh pi file for a rotation child inherits the
+    // parent's session counters first, so rotation/retry can never reset
+    // the per-session mutating/typing caps. Scoped reads only (ids stay
+    // server-side); missing parent/mapping simply skips the carry.
+    if let Ok(store) = chat.lock() {
+        let parent = store
+            .get_parent_session_id(&input.chat_session_id, &input.user_id)
+            .ok()
+            .flatten();
+        if let Some(p) = parent {
+            if let Ok(Some(pf)) = store.get_pi_session(&p, &input.user_id) {
+                super::routes::carry_session_budget(&pf, &pi_file);
+            }
+        }
+    }
     super::routes::reset_turn_budget(&pi_file, input.dry_run, &input.lang);
+    // Memory layer (wave 14 §3, turn plumbing — the ONLY turn.rs change
+    // this wave): install the turn's store context so the memory_* catalog
+    // tools resolve an owner inside exec (the bridge cannot pass one).
+    // The guard uninstalls on drop, including every early return below.
+    // Wake notes prepend here (prompt.rs formats the block); the caller's
+    // TURN_REMINDER suffix is untouched — wake supplements, never replaces.
+    let _memory_guard = crate::harness::exec::install_memory_ctx(
+        chat,
+        &input.user_id,
+        &input.provider,
+    );
+    let turn_message: String = match chat.lock().ok() {
+        Some(store) => {
+            let wake =
+                crate::harness::exec::load_wake_notes(&store, &input.user_id, &input.message);
+            // Audit trail (content-free): record WHICH notes shaped this
+            // turn — ids only, never text — so the diagnostics mirror
+            // answers "what did the model see?" without leaking content.
+            if !wake.is_empty() {
+                let ids: Vec<&str> = wake.iter().map(|n| n.id.as_str()).collect();
+                crate::diagnostics::push(format!(
+                    "memory: wake with {} note(s) [{}]",
+                    ids.len(),
+                    ids.join(",")
+                ));
+            }
+            match crate::harness::prompt::wake_block(&wake) {
+                Some(block) => format!("{block}\n\n{}", input.message),
+                None => input.message.clone(),
+            }
+        }
+        None => input.message.clone(),
+    };
     // Register for the tool callback endpoint (stable across restarts).
     sup.map_session(
         &input.user_id,
@@ -381,10 +779,24 @@ async fn run_turn_inner(
     })?;
 
     let mut rx = child.subscribe();
+    // Rotation handoff rides the ephemeral prepend channel (like
+    // turn_context and the wake block): it is part of THIS prompt only and
+    // is never stored — SQLite keeps the raw user message, pi keeps its own
+    // history. Applied outside `turn_message` on purpose: whatever that
+    // composes (wake notes today, more tomorrow) keeps working unchanged,
+    // and current wake notes already ride along on the fresh turn.
+    let prompt_text = if input.handoff.trim().is_empty() {
+        turn_message
+    } else {
+        format!(
+            "[Continuing an earlier conversation — verbatim excerpts, oldest first]\n{}\n\n{turn_message}",
+            input.handoff.trim(),
+        )
+    };
     let mut prompt = serde_json::Map::new();
     prompt.insert("id".to_string(), Value::String(sup.next_id("prompt")));
     prompt.insert("type".to_string(), Value::String("prompt".to_string()));
-    prompt.insert("message".to_string(), Value::String(input.message.clone()));
+    prompt.insert("message".to_string(), Value::String(prompt_text));
     child
         .command(Value::Object(prompt), CHILD_REQ_TIMEOUT)
         .await?;
@@ -514,8 +926,23 @@ async fn run_turn_inner(
                 "extension_error" => {
                     crate::diagnostics::push(format!("pi extension error: {ev}"));
                 }
-                "compaction_start" | "compaction_end" => {
+                "compaction_start" => {
                     crate::diagnostics::push(format!("pi compaction event: {kind}"));
+                }
+                // Reactive rotation path (doc 14 §2): pi compacted its own
+                // context behind us, so the NEXT send starts a linked row
+                // with a verbatim handoff. Never mid-turn — just arm the
+                // flag; routes.rs consumes it before the next user message
+                // is stored.
+                "compaction_end" => {
+                    crate::diagnostics::push(format!("pi compaction event: {kind}"));
+                    if let Ok(store) = chat.lock() {
+                        store.mark_pending_rotation(&input.chat_session_id, "compaction");
+                        crate::diagnostics::push(format!(
+                            "[rotation] session={} armed reason=compaction",
+                            input.chat_session_id.chars().take(8).collect::<String>(),
+                        ));
+                    }
                 }
                 "message_end" => {
                     // Last assistant stop reason wins: it describes the

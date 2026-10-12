@@ -63,6 +63,8 @@ export const en: Record<I18nKey, string> = {
   "chat.copy": "Copy text",
   "chat.copied": "Copied!",
   "chat.timeout": "The response took too long; try again.",
+  "chat.rotated":
+    "Context refreshed — full history in Settings → History",
   "agent.title": "Agent conversation",
   "agent.connected": "Connected",
   "agent.ready": "Ready · reasoning & synthesizing",
@@ -172,6 +174,9 @@ export const en: Record<I18nKey, string> = {
   "settings.ai": "AI model",
   "settings.voice": "Voice",
   "settings.account": "Account",
+  "settings.history": "History",
+  "settings.historyNote":
+    "Your saved conversations. Opening one shows it in the chat without changing your model; deleting removes it forever.",
   "settings.providerNote": "Only detected providers can be selected.",
   "settings.accountNote": "Your session on this device.",
   "settings.diagnostics": "Diagnostics",

@@ -4,12 +4,20 @@
 //! is tiny and SQLite serializes writers, so domains stay decoupled without
 //! a shared pool. Revisit only if contention ever shows up (it won't locally).
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
+use std::sync::Mutex as StdMutex;
 
 use super::model::{Action, ChatMessageRow, Selection, Session, SessionSummary};
 use crate::platform::db;
 
 pub struct ChatStore {
     conn: Connection,
+    /// Pending rotation flags (doc 14 §2): session id → reason
+    /// (`threshold` | `overflow` | `compaction`). Set post-turn or by a
+    /// reactive path, consumed on the NEXT send (never mid-turn). In-memory
+    /// only: a restart drops the flag and the next threshold check re-arms
+    /// it — rotation is an optimization, never load-bearing state.
+    pending_rotation: StdMutex<HashMap<String, String>>,
 }
 
 /// A user's whole local history, used to repair the cloud mirror
@@ -47,7 +55,25 @@ impl ChatStore {
                 [],
             );
         }
-        Ok(Self { conn })
+        // Rotation engine (doc 14 §2): successor rows link to the frozen
+        // row they continue. Tolerate pre-migration databases like above.
+        let has_parent_col: bool = conn
+            .prepare("SELECT parent_session_id FROM chat_sessions LIMIT 0")
+            .is_ok();
+        if !has_parent_col {
+            let _ = conn.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+                [],
+            );
+        }
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS chat_sessions_parent_idx ON chat_sessions (parent_session_id)",
+            [],
+        );
+        Ok(Self {
+            conn,
+            pending_rotation: StdMutex::new(HashMap::new()),
+        })
     }
 
     pub fn create_session(
@@ -72,6 +98,96 @@ impl ChatStore {
             created_at: ts.clone(),
             updated_at: ts,
         })
+    }
+
+    /// Rotation successor (doc 14 §2): freezes nothing itself — the caller
+    /// stops writing to the parent — and opens the linked row the next send
+    /// continues under. The new row starts with no pi mapping (fresh pi
+    /// session on the next turn); the parent keeps its mapping for audit.
+    pub fn create_child_session(
+        &self,
+        user_id: &str,
+        title: &str,
+        provider: &str,
+        model: Option<&str>,
+        parent_id: &str,
+    ) -> rusqlite::Result<Session> {
+        // Defense in depth: the caller must have owner-checked the parent
+        // (rotate_for_send does), but a bare parent id must never link
+        // across user scopes — verify here and fail closed on mismatch.
+        match self.get_session(parent_id, user_id)? {
+            Some(_) => {}
+            None => {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "parent session not found".to_string(),
+                ))
+            }
+        }
+        let id = random_id();
+        let ts = now();
+        self.conn.execute(
+            "INSERT INTO chat_sessions(id, user_id, title, provider, model, parent_session_id, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?7)",
+            params![id, user_id, title, provider, model, parent_id, ts],
+        )?;
+        Ok(Session {
+            id,
+            title: title.to_string(),
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+    }
+
+    /// Parent link for the detail view (doc 14 §2: additive detail field).
+    /// Pre-migration databases lack the column: None, never an error.
+    pub fn get_parent_session_id(
+        &self,
+        id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Option<String>> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT parent_session_id FROM chat_sessions WHERE id = ?1 AND user_id = ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        let mut rows = stmt.query(params![id, user_id])?;
+        match rows.next()? {
+            Some(r) => Ok(r.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// User turns so far (role = 'user'). Rotation needs ≥ 2: a first-turn
+    /// overflow surfaces honestly, there is nothing to hand off yet.
+    pub fn count_user_turns(&self, session_id: &str) -> rusqlite::Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1 AND role = 'user'",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// Arm a rotation for the NEXT send. Overwrites any earlier reason:
+    /// the newest signal (threshold → overflow → compaction) describes the
+    /// pressure best. Lock-poisoning degrades to a lost flag (no rotation),
+    /// never to a failed turn.
+    pub fn mark_pending_rotation(&self, session_id: &str, reason: &str) {
+        if let Ok(mut pending) = self.pending_rotation.lock() {
+            pending.insert(session_id.to_string(), reason.to_string());
+        }
+    }
+
+    /// Consume the pending flag (if any) for the next send. Returns the
+    /// reason (`threshold` | `overflow` | `compaction`).
+    pub fn take_pending_rotation(&self, session_id: &str) -> Option<String> {
+        self.pending_rotation
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(session_id))
     }
 
     pub fn get_session(&self, id: &str, user_id: &str) -> rusqlite::Result<Option<Session>> {
@@ -223,6 +339,22 @@ impl ChatStore {
         })
     }
 
+    /// Owner-scoped message read: verifies the session belongs to `user_id`
+    /// first, so a bare session id can never cross user scopes. Rotation
+    /// and other cross-row reads must use this, not `list_messages`.
+    pub fn list_messages_owned(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Vec<ChatMessageRow>> {
+        match self.get_session(session_id, user_id)? {
+            Some(_) => self.list_messages(session_id),
+            None => Err(rusqlite::Error::InvalidParameterName(
+                "session not found".to_string(),
+            )),
+        }
+    }
+
     pub fn list_messages(&self, session_id: &str) -> rusqlite::Result<Vec<ChatMessageRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, content, created_at FROM chat_messages
@@ -329,13 +461,14 @@ impl ChatStore {
         title: &str,
         provider: &str,
         model: Option<&str>,
+        parent_session_id: Option<&str>,
         created_at: &str,
         updated_at: &str,
     ) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
-            "INSERT INTO chat_sessions(id, user_id, title, provider, model, created_at, updated_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO NOTHING",
-            params![id, user_id, title, provider, model, created_at, updated_at],
+            "INSERT INTO chat_sessions(id, user_id, title, provider, model, parent_session_id, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO NOTHING",
+            params![id, user_id, title, provider, model, parent_session_id, created_at, updated_at],
         )?;
         Ok(n > 0)
     }
@@ -349,12 +482,13 @@ impl ChatStore {
         title: &str,
         provider: &str,
         model: Option<&str>,
+        parent_session_id: Option<&str>,
         updated_at: &str,
     ) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
-            "UPDATE chat_sessions SET title = ?3, provider = ?4, model = ?5, updated_at = ?6
+            "UPDATE chat_sessions SET title = ?3, provider = ?4, model = ?5, parent_session_id = ?6, updated_at = ?7
              WHERE id = ?1 AND user_id = ?2",
-            params![id, user_id, title, provider, model, updated_at],
+            params![id, user_id, title, provider, model, parent_session_id, updated_at],
         )?;
         Ok(n > 0)
     }
@@ -540,6 +674,111 @@ impl ChatStore {
         Ok(())
     }
 
+    // -----------------------------------------------------------------
+    // Memory layer (wave 14 §3, v1: LOCAL-ONLY). Append-only note log:
+    // there is deliberately NO delete method, and export() above never
+    // includes these rows (no cloud sync in v1 — see schema.sql). Merge
+    // (§3 inline merge) compacts at READ time (exec::merged_topic_view)
+    // so this table stays pure append.
+    // -----------------------------------------------------------------
+
+    /// Insert one note. `text` is capped at 280 chars (exec enforces the
+    /// same cap with user-facing copy; this is the backstop). Empty text
+    /// is refused. `source` is 'user' | 'extracted' | 'boundary'.
+    pub fn add_memory_note(
+        &self,
+        user_id: &str,
+        text: &str,
+        topic: Option<&str>,
+        source: &str,
+    ) -> rusqlite::Result<MemoryNote> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "memory note text is required".to_string(),
+            ));
+        }
+        if text.chars().count() > MEMORY_NOTE_MAX_CHARS {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "memory note too long (max {MEMORY_NOTE_MAX_CHARS} chars)"
+            )));
+        }
+        let topic = topic.map(str::trim).filter(|t| !t.is_empty());
+        if topic.as_ref().is_some_and(|t| t.chars().count() > MEMORY_TOPIC_MAX_CHARS) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "memory note topic too long (max {MEMORY_TOPIC_MAX_CHARS} chars)"
+            )));
+        }
+        let id = random_id();
+        let ts = now();
+        self.conn.execute(
+            "INSERT INTO memory_notes(id, user_id, text, topic, source, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?6)",
+            params![id, user_id, text, topic, source, ts],
+        )?;
+        Ok(MemoryNote {
+            id,
+            text: text.to_string(),
+            topic: topic.map(str::to_string),
+            source: source.to_string(),
+            created_at: ts.clone(),
+            updated_at: ts,
+        })
+    }
+
+    /// User-scoped purge (recovery from bad/poisoned memory): deletes
+    /// every note of this user, returns the count. No per-note delete in
+    /// v1 — poisoning is removed wholesale, then re-taught. Session rows
+    /// are untouched (the log stays; only the tree cache goes).
+    pub fn delete_memory_notes_for_user(&self, user_id: &str) -> rusqlite::Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM memory_notes WHERE user_id = ?1",
+            params![user_id],
+        )?)
+    }
+
+    /// This user's notes, newest first (wake/recall rank from this).
+    pub fn list_memory_notes(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<MemoryNote>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, topic, source, created_at, updated_at FROM memory_notes
+             WHERE user_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![user_id, limit], row_to_memory_note)?;
+        rows.collect()
+    }
+
+    /// Notes under one topic, oldest first (zoom order; boundary notes
+    /// ride along so the walk crosses rotation boundaries).
+    pub fn memory_notes_for_topic(
+        &self,
+        user_id: &str,
+        topic: &str,
+    ) -> rusqlite::Result<Vec<MemoryNote>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, topic, source, created_at, updated_at FROM memory_notes
+             WHERE user_id = ?1 AND topic = ?2
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![user_id, topic], row_to_memory_note)?;
+        rows.collect()
+    }
+
+    pub fn count_memory_notes_for_topic(
+        &self,
+        user_id: &str,
+        topic: &str,
+    ) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM memory_notes WHERE user_id = ?1 AND topic = ?2",
+            params![user_id, topic],
+            |r| r.get(0),
+        )
+    }
+
     /// This user's messages + actions for one session, oldest first, for
     /// the audit export (T4 G5). Redaction happens at the route layer.
     pub fn audit_lines(
@@ -570,6 +809,37 @@ impl ChatStore {
         }
         Ok(out)
     }
+}
+
+/// One row of the append-only `memory_notes` log (wave 14 §3, local-only
+/// v1: never synced, never deleted — see schema.sql).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryNote {
+    pub id: String,
+    pub text: String,
+    pub topic: Option<String>,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Hard cap on note text (§3: `text (≤280)`), in chars. Enforced both in
+/// exec (user-facing copy) and in `add_memory_note` (backstop).
+pub const MEMORY_NOTE_MAX_CHARS: usize = 280;
+/// Hard cap on topic length: topics ride the wake budget uncounted, so an
+/// unbounded topic would bypass it (and break the `- text [topic]` line).
+/// Enforced in schema + exec + `add_memory_note` backstop.
+pub const MEMORY_TOPIC_MAX_CHARS: usize = 64;
+
+fn row_to_memory_note(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryNote> {
+    Ok(MemoryNote {
+        id: r.get(0)?,
+        text: r.get(1)?,
+        topic: r.get(2)?,
+        source: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
 }
 
 fn row_to_action(r: &rusqlite::Row<'_>) -> rusqlite::Result<Action> {
@@ -653,6 +923,112 @@ mod tests {
         assert!(!s.delete_session(&a.id, &uid).unwrap());
         assert!(s.list_messages(&a.id).unwrap().is_empty());
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn memory_notes_append_only_and_scoped() {
+        let (path, s, uid) = setup();
+        // Empty topic normalizes to None; source rides along.
+        let n = s
+            .add_memory_note(&uid, "prefiere firefox", Some("  "), "user")
+            .unwrap();
+        assert!(n.topic.is_none());
+        assert_eq!(n.source, "user");
+        s.add_memory_note(&uid, "le gusta el té", Some("gustos"), "extracted")
+            .unwrap();
+        // Scoped per user: a stranger sees nothing.
+        assert!(s.list_memory_notes("stranger", 10).unwrap().is_empty());
+        assert_eq!(s.list_memory_notes(&uid, 10).unwrap().len(), 2);
+        // Newest first.
+        let all = s.list_memory_notes(&uid, 10).unwrap();
+        assert_eq!(all[0].text, "le gusta el té");
+        assert_eq!(s.count_memory_notes_for_topic(&uid, "gustos").unwrap(), 1);
+        // 280-char backstop: exactly 280 passes, 281 fails.
+        s.add_memory_note(&uid, &"x".repeat(280), None, "user")
+            .unwrap();
+        assert!(s.add_memory_note(&uid, &"x".repeat(281), None, "user").is_err());
+        assert!(s.add_memory_note(&uid, "   ", None, "user").is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rotation_child_links_to_parent_and_counts_turns() {
+        let (path, s, uid) = setup();
+        // Fresh schema carries the column (+ index for the chain walk).
+        let col: String = s
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'chat_sessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(col.contains("parent_session_id"), "{col}");
+        let idx: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chat_sessions_parent_idx'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+
+        let parent = s.create_session(&uid, "Long thread", "ollama", None).unwrap();
+        assert_eq!(s.get_parent_session_id(&parent.id, &uid).unwrap(), None);
+        assert_eq!(s.count_user_turns(&parent.id).unwrap(), 0);
+
+        // One turn: not eligible yet (minimum 2).
+        s.add_message(&parent.id, "user", "hola").unwrap();
+        s.add_message(&parent.id, "assistant", "buenas").unwrap();
+        assert_eq!(s.count_user_turns(&parent.id).unwrap(), 1);
+        // Tool turns are audit, not conversation: they never count.
+        s.add_message(&parent.id, "tool", "{}").unwrap();
+        assert_eq!(s.count_user_turns(&parent.id).unwrap(), 1);
+
+        s.add_message(&parent.id, "user", "otra cosa").unwrap();
+        assert_eq!(s.count_user_turns(&parent.id).unwrap(), 2);
+
+        let child = s
+            .create_child_session(&uid, &parent.title, &parent.provider, None, &parent.id)
+            .unwrap();
+        assert_ne!(child.id, parent.id);
+        assert_eq!(
+            s.get_parent_session_id(&child.id, &uid).unwrap().as_deref(),
+            Some(parent.id.as_str())
+        );
+        // Ownership scoped: strangers see no link.
+        assert_eq!(s.get_parent_session_id(&child.id, "stranger").unwrap(), None);
+        // The child starts fresh (no messages, no pi mapping).
+        assert!(s.list_messages(&child.id).unwrap().is_empty());
+        assert_eq!(s.get_pi_session(&child.id, &uid).unwrap(), None);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn pending_rotation_flag_is_take_once_and_latest_reason_wins() {
+        let (path, s, uid) = setup();
+        let sess = s.create_session(&uid, "T", "ollama", None).unwrap();
+        assert_eq!(s.take_pending_rotation(&sess.id), None);
+        s.mark_pending_rotation(&sess.id, "threshold");
+        // Newest signal wins (overflow supersedes the threshold arming).
+        s.mark_pending_rotation(&sess.id, "overflow");
+        assert_eq!(
+            s.take_pending_rotation(&sess.id).as_deref(),
+            Some("overflow")
+        );
+        // Take-once: the next send after rotation finds nothing pending.
+        assert_eq!(s.take_pending_rotation(&sess.id), None);
+        // Flags are per-session: a sibling row is unaffected.
+        let other = s.create_session(&uid, "U", "ollama", None).unwrap();
+        s.mark_pending_rotation(&sess.id, "compaction");
+        assert_eq!(s.take_pending_rotation(&other.id), None);
+        assert_eq!(
+            s.take_pending_rotation(&sess.id).as_deref(),
+            Some("compaction")
+        );
         std::fs::remove_file(&path).ok();
     }
 }

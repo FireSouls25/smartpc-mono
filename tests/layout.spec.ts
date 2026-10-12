@@ -10,7 +10,9 @@ test.beforeEach(async ({ request, context }) => {
 test("shell locks to viewport; panes scroll internally", async ({ page }) => {
   await page.goto(APP, { waitUntil: "networkidle" });
   // Logged in via seeded refresh token: main shell with its three panes.
-  await expect(page.getByText("Chats").first()).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Actividad").first()).toBeVisible({
+    timeout: 20000,
+  });
   await expect(page.getByText("Actividad").first()).toBeVisible();
 
   const before = await page.evaluate(() => ({
@@ -76,11 +78,18 @@ test("opening a session never touches the global selection", async ({
   });
 
   await page.goto(APP, { waitUntil: "networkidle" });
-  await expect(page.getByText("Chats").first()).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Actividad").first()).toBeVisible({
+    timeout: 20000,
+  });
+  // History lives in Settings now (§14.1): browse it there, read-only.
+  await page.getByRole("button", { name: /Ajustes|Settings/ }).click();
+  await page.getByText("Historial").click();
+  expect(page.url()).toContain("#/settings/4");
   await page.getByText("History probe").click();
-  // Empty session loads: the greeting is replaced by nothing, the adopt
-  // affordance appears (combo recorded), and no selection round-trip
-  // happened (old code POSTed here).
+  // Back home: empty session loads (greeting replaced by nothing), the
+  // adopt affordance appears (combo recorded), and no selection
+  // round-trip happened (old code POSTed here).
+  await page.getByRole("button", { name: /Volver|Back/ }).click();
   await expect(page.getByText(/qué hacemos|what shall/i)).toHaveCount(0, {
     timeout: 10000,
   });
@@ -93,7 +102,9 @@ test("opening a session never touches the global selection", async ({
 
 test("settings route deep-links sections", async ({ page }) => {
   await page.goto(APP, { waitUntil: "networkidle" });
-  await expect(page.getByText("Chats").first()).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Actividad").first()).toBeVisible({
+    timeout: 20000,
+  });
 
   // Gear → #/settings (general section, sidebar port renders).
   await page.getByRole("button", { name: /Ajustes|Settings/ }).click();
@@ -146,12 +157,14 @@ test("settings route deep-links sections", async ({ page }) => {
 
   // Unknown hashes fall back home.
   await page.goto(`${APP}#/nope`, { waitUntil: "networkidle" });
-  await expect(page.getByText("Chats").first()).toBeVisible({ timeout: 20000 });
+  await expect(page.getByText("Actividad").first()).toBeVisible({
+    timeout: 20000,
+  });
 
   // Back button leaves settings for the main shell.
   await page.getByRole("button", { name: /Ajustes|Settings/ }).click();
   await page.getByRole("button", { name: /Volver|Back/ }).click();
-  await expect(page.getByText("Chats").first()).toBeVisible();
+  await expect(page.getByText("Actividad").first()).toBeVisible();
   await page.screenshot({ path: "test-results/layout-settings.png" });
 });
 
@@ -162,7 +175,7 @@ test(
     // Cold VRAM loads of multi-GB models are slow: allow generously.
     test.setTimeout(360000);
     await page.goto(APP, { waitUntil: "networkidle" });
-    await expect(page.getByText("Chats").first()).toBeVisible({
+    await expect(page.getByText("Actividad").first()).toBeVisible({
       timeout: 20000,
     });
 
@@ -199,14 +212,17 @@ test(
       timeout: 10000,
     });
     // After the server round-trip the greeting is replaced by the real reply,
-    // so there is exactly one assistant bubble: assert on its content.
-    await expect(page.locator(".bubble-assistant").last()).toContainText(
+    // so there is exactly one assistant reply: assert on its content.
+    await expect(page.locator(".reply-text").last()).toContainText(
       "hola-test",
       { timeout: 240000 },
     );
-    const reply = await page.locator(".bubble-assistant").last().textContent();
+    const reply = await page.locator(".reply-text").last().textContent();
     expect(reply).not.toMatch(/^Error:/);
-    // A session shows up in the right pane.
+    // The turn lands in History (Settings): the unified chat keeps no
+    // sessions pane on the main screen anymore.
+    await page.getByRole("button", { name: /Ajustes|Settings/ }).click();
+    await page.getByText("Historial").click();
     await expect(page.getByText(/Reply with exactly/i).first()).toBeVisible({
       timeout: 10000,
     });

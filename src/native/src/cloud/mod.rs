@@ -467,6 +467,7 @@ mod tests {
         let ts = "2026-01-01T00:00:00Z".to_string();
         cloud.enqueue(Job::Session {
             user_id: "u1".into(),
+            parent: None,
             session: Session {
                 id: "s1".into(),
                 title: "Hola".into(),
@@ -548,6 +549,7 @@ mod tests {
         let ts = "2026-01-01T00:00:00Z".to_string();
         cloud.enqueue(Job::Session {
             user_id: "u1".into(),
+            parent: None,
             session: Session {
                 id: "s1".into(),
                 title: "Hola".into(),

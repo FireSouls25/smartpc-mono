@@ -36,6 +36,10 @@ let messages = $state<ChatMsg[]>(greeting());
 let events = $state<AppEvent[]>([]);
 let contextUsed = $state(0);
 let draft = $state("");
+// Seamless rotation flag (§14.1): the sidecar answers `rotated: true` on the
+// turn that crossed into a fresh session row. Rendered as a divider chip in
+// CenterPanel; cleared on the next send (or when the view is replaced).
+let justRotated = $state(false);
 
 type ReplyListener = (id: string | undefined, text: string | undefined) => void;
 const replyListeners = new SvelteSet<ReplyListener>();
@@ -70,6 +74,11 @@ function setOrb(next: OrbState): void {
   orb = next;
 }
 
+/** Dismiss the rotation divider chip without sending. */
+function clearRotated(): void {
+  justRotated = false;
+}
+
 export function toEvent(a: {
   id: string;
   title: string;
@@ -93,6 +102,7 @@ function newChat(): void {
   sessionStore.clearActive();
   messages = greeting();
   events = [];
+  justRotated = false;
 }
 
 async function openSession(id: string): Promise<void> {
@@ -110,6 +120,9 @@ async function openSession(id: string): Promise<void> {
       text: m.content,
     }));
   events = d.actions.map(toEvent);
+  // A stored session replaces the live view, so a rotation chip from the
+  // previous conversation must not linger over it.
+  justRotated = false;
   // View-only: the global selection is untouched. Follow-ups run under the
   // active combo until the user explicitly adopts this session's (see
   // adoptSessionCombo, surfaced in CenterPanel).
@@ -140,6 +153,8 @@ let sendController: AbortController | null = null;
 async function send(text: string): Promise<boolean> {
   const clean = text.trim();
   if (!clean || orb === "thinking") return false;
+  // The rotation chip refers to the turn just sent: any new send retires it.
+  justRotated = false;
   messages = [...messages, { role: "user", text: clean }];
   draft = "";
   orb = "thinking";
@@ -151,6 +166,11 @@ async function send(text: string): Promise<boolean> {
       signal: controller.signal,
     });
     sessionStore.setActive(res.session_id, null);
+    // Additive sidecar flag (§14.1, no PROTOCOL bump): the turn above was
+    // persisted under a fresh session row after a seamless rotation.
+    // Unknown to older sidecars → undefined → no chip (backwards safe).
+    if ((res as unknown as { rotated?: unknown }).rotated === true)
+      justRotated = true;
     contextUsed = res.context.used_tokens;
     if (res.context.window != null)
       providerStore.setContextWindow(res.context.window);
@@ -209,6 +229,9 @@ export const chatStore = {
   get orb(): OrbState {
     return orb;
   },
+  get justRotated(): boolean {
+    return justRotated;
+  },
   get messages(): ChatMsg[] {
     return messages;
   },
@@ -223,6 +246,7 @@ export const chatStore = {
   },
   setDraft,
   setOrb,
+  clearRotated,
   newChat,
   openSession,
   adoptSessionCombo,

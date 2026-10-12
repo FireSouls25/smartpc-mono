@@ -13,6 +13,7 @@
   import { getTheme, setTheme, type Theme } from "../../lib/theme.svelte";
   import { providerStore as providers } from "../assistant/providers.store.svelte";
   import ProviderStart from "../assistant/ProviderStart.svelte";
+  import SessionsPane from "../assistant/SessionsPane.svelte";
   import { voice, DEFAULT_WAKE_WORD } from "../voice/voice.store.svelte";
   import {
     DEFAULT_HOTKEY,
@@ -38,7 +39,7 @@
 
   // Gestures were cut here on purpose (P2 #13): the toggle switched state
   // with no detection pipeline behind it. It returns with the pipeline.
-  const sections = ["general", "ai", "voice", "account"] as const;
+  const sections = ["general", "ai", "voice", "account", "history"] as const;
   const clamp = (n: number): number =>
     Math.min(sections.length - 1, Math.max(0, n));
   // Local state synced FROM the route (Back button, deep links); writes go
@@ -76,6 +77,9 @@
     }
     if (section === 3) {
       void cloud.load();
+    }
+    if (section === 4) {
+      void sessionStore.refreshSessions();
     }
   });
 
@@ -862,6 +866,13 @@
               <p class="error-box mt-2">{ttsModelsError}</p>
             {/if}
           </div>
+        </div>
+      {:else if section === 4}
+        <!-- §14.1 History: the sessions list/detail reused as-is (same rows,
+          read-only view + delete, no behavior change). -->
+        <div class="flex flex-col gap-4">
+          <p class="muted text-sm">{t("settings.historyNote")}</p>
+          <SessionsPane />
         </div>
       {:else}
         <div class="flex flex-col gap-4">

@@ -103,6 +103,14 @@ impl TurnBudget {
         std::mem::replace(&mut self.abort_pending, false)
     }
 
+    /// Copy-on-rotate: inherit another budget's session counters and abort
+    /// flag. Rotation and overflow-retry mint fresh pi files; without this
+    /// the per-session mutating/typing caps would reset on every rotation.
+    pub fn carry_from(&mut self, other: &TurnBudget) {
+        self.session = other.session.clone();
+        self.abort_pending = other.abort_pending;
+    }
+
     /// Merge a concurrently-executed sibling back into the map entry.
     /// Counters take the max (every sibling charged from the same base, so
     /// max keeps each charge exactly once in the common sequential case and
