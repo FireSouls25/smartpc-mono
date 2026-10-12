@@ -1,0 +1,111 @@
+# Release installers, one per OS, on every version-tag push.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Per-OS notes (see the cross-platform review in chat, 2026-10-12):
+# - Native build deps differ per runner: cmake + C++ everywhere (whisper.cpp
+#   compiles from bundled sources), plus libasound2-dev on Linux only
+#   (cpal/ALSA). macOS/Windows need no audio headers (CoreAudio/WASAPI).
+# - MSVC is the default Rust toolchain on windows-latest (no override).
+# - Node 22+ is a *runtime* prerequisite on user machines (pi agent + TTS
+#   synth daemon are spawned via node/npx and are NOT bundled); the app
+#   starts without it and says so. Nothing to install for it here.
+# - macOS output is unsigned (Gatekeeper warning until signing is set up);
+#   Windows builds NSIS installers; Linux builds AppImage.
+# - First green run on Windows/macOS also serves as the first-ever compile
+#   check there: `screenshots`, `active-win-pos-rs`, whisper-rs/MSVC and
+#   keyring/secret-service are the likely friction points if anything fails.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: windows-latest
+            arch: x64
+          - os: macos-latest
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Native build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake libasound2-dev
+
+      - name: Native build deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake || true
+
+      - name: Native build deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install cmake --no-progress -y
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # target/ holds multi-GB whisper + sherpa artifacts; keep it warm.
+          shared-key: release-${{ matrix.os }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+        shell: bash
+
+      # Full installer for the runner OS (AppImage / NSIS / dmg per yml).
+      - name: Build release installer
+        run: node scripts/build-release.mjs
+        shell: bash
+
+      # Smoke: the staged sidecar binary boots and answers /health.
+      # Portable shell (git-bash on Windows): start, probe, kill.
+      - name: Smoke-test the sidecar binary
+        shell: bash
+        run: |
+          BIN="release/staging/bin/smartpc-native"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          test -x "$BIN"
+          "$BIN" --port 18099 --token smoke-token-min-16-chars!! --db "$RUNNER_TEMP/smoke.db" > "$RUNNER_TEMP/smoke.log" 2>&1 &
+          SIDECAR_PID=$!
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:18099/health | grep -q '"status":"ok"'; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:18099/health | grep -q '"status":"ok"'
+          kill $SIDECAR_PID
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ runner.os }}-${{ matrix.arch }}
+          path: release/out/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: installers/*
+          generate_release_notes: true
