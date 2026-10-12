@@ -704,7 +704,10 @@ impl ChatStore {
             )));
         }
         let topic = topic.map(str::trim).filter(|t| !t.is_empty());
-        if topic.as_ref().is_some_and(|t| t.chars().count() > MEMORY_TOPIC_MAX_CHARS) {
+        if topic
+            .as_ref()
+            .is_some_and(|t| t.chars().count() > MEMORY_TOPIC_MAX_CHARS)
+        {
             return Err(rusqlite::Error::InvalidParameterName(format!(
                 "memory note topic too long (max {MEMORY_TOPIC_MAX_CHARS} chars)"
             )));
@@ -765,18 +768,6 @@ impl ChatStore {
         )?;
         let rows = stmt.query_map(params![user_id, topic], row_to_memory_note)?;
         rows.collect()
-    }
-
-    pub fn count_memory_notes_for_topic(
-        &self,
-        user_id: &str,
-        topic: &str,
-    ) -> rusqlite::Result<i64> {
-        self.conn.query_row(
-            "SELECT COUNT(*) FROM memory_notes WHERE user_id = ?1 AND topic = ?2",
-            params![user_id, topic],
-            |r| r.get(0),
-        )
     }
 
     /// This user's messages + actions for one session, oldest first, for
@@ -943,7 +934,6 @@ mod tests {
         // Newest first.
         let all = s.list_memory_notes(&uid, 10).unwrap();
         assert_eq!(all[0].text, "le gusta el té");
-        assert_eq!(s.count_memory_notes_for_topic(&uid, "gustos").unwrap(), 1);
         // 280-char backstop: exactly 280 passes, 281 fails.
         s.add_memory_note(&uid, &"x".repeat(280), None, "user")
             .unwrap();
@@ -1029,6 +1019,38 @@ mod tests {
             s.take_pending_rotation(&sess.id).as_deref(),
             Some("compaction")
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn pre_migration_db_boots_and_gains_parent_column() {
+        // Regression: the schema batch must stay runnable against old DBs
+        // (a failing statement aborts boot). Simulate a pre-rotation
+        // database: full old schema, no parent_session_id column.
+        let path = tmp_db();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE users(id TEXT PRIMARY KEY, email TEXT NOT NULL);
+                 CREATE TABLE chat_sessions(
+                   id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                   title TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'ollama',
+                   model TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+        // Boot must succeed (previously died on the parent index inside
+        // the batch) and the migration must add the column + index.
+        let store = ChatStore::open(&path).unwrap();
+        let cols: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('chat_sessions')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.contains(&"parent_session_id".to_string()));
         std::fs::remove_file(&path).ok();
     }
 }

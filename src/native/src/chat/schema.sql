@@ -15,8 +15,9 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 );
 CREATE INDEX IF NOT EXISTS chat_sessions_user_idx
   ON chat_sessions (user_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS chat_sessions_parent_idx
-  ON chat_sessions (parent_session_id);
+-- NOTE: chat_sessions_parent_idx lives in ChatStore::open, NOT here: this
+-- batch must stay runnable against pre-migration databases (where the
+-- column does not exist yet), and a failing statement aborts the boot.
 
 CREATE TABLE IF NOT EXISTS chat_messages (
   id          TEXT PRIMARY KEY,
