@@ -81,6 +81,19 @@ jobs:
       - run: npm ci
         shell: bash
 
+      # Vendored pi CLI + TTS engine: staged (pruned) into the installer
+      # by scripts/build-release.mjs. Same cache as ci.yml.
+      - name: Cache pi-bridge deps
+        uses: actions/cache@v4
+        id: pi-bridge
+        with:
+          path: pi-bridge/node_modules
+          key: pi-bridge-${{ runner.os }}-${{ hashFiles('pi-bridge/package-lock.json') }}
+      - name: Install pi-bridge deps
+        if: steps.pi-bridge.outputs.cache-hit != 'true'
+        run: npm --prefix pi-bridge ci --no-audit --no-fund
+        shell: bash
+
       # Full installer for the runner OS (AppImage / NSIS / dmg per yml).
       - name: Build release installer
         run: node scripts/build-release.mjs

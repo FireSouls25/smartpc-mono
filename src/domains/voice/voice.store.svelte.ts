@@ -158,8 +158,8 @@ let speakSeq = 0;
 let ttsVoice = $state<string>(loadTtsVoice());
 let ttsTesting = $state(false);
 /** Catalog id currently downloading via `downloadTtsVoice` (null = none).
- * First use fetches the model inside pi-listen (up to ~126 MB), so the
- * Settings panel shows an indeterminate progress bar meanwhile. */
+ * First use fetches the model through the TTS daemon (up to ~126 MB), so
+ * the Settings panel shows an indeterminate progress bar meanwhile. */
 let ttsDownloading = $state<string | null>(null);
 let lastSpokenId: string | null = null;
 // Transient acknowledgment ("heard the wake word, talk now"), cleared after
@@ -796,7 +796,7 @@ function setTtsVoice(id: string): void {
 /**
  * Download (first use) + prove a catalog voice: speaks the canned phrase
  * with that voice on a 180 s budget. Doubles as the install trigger —
- * pi-listen fetches the model, later speaks are instant. Returns whether
+ * the daemon fetches the model, later speaks are instant. Returns whether
  * the voice is now ready (Settings reloads its catalog on true).
  */
 async function downloadTtsVoice(id: string): Promise<boolean> {

@@ -89,7 +89,6 @@ impl TtsError {
 pub struct TtsManager {
     inner: Arc<Mutex<TtsInner>>,
     data_dir: PathBuf,
-    voice_ext: PathBuf,
     playback: crate::playback::LiveSink,
 }
 
@@ -105,7 +104,7 @@ struct TtsInner {
 }
 
 impl TtsManager {
-    pub fn new(data_dir: PathBuf, voice_ext: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         Self {
             inner: Arc::new(Mutex::new(TtsInner {
                 generation: 0,
@@ -114,7 +113,6 @@ impl TtsManager {
                 last: None,
             })),
             data_dir,
-            voice_ext,
             playback: crate::playback::LiveSink::new(),
         }
     }
@@ -156,9 +154,8 @@ impl TtsManager {
         let synth_script = resolve_tts_synth();
         if !synth_script.is_file() {
             return Err(TtsError::Misconfigured(format!(
-                "tts engine missing: {} not found (run `npm install` in frontend/pi-bridge?). The legacy voice extension at {} is no longer used.",
-                synth_script.display(),
-                self.voice_ext.display()
+                "tts engine missing: {} not found (run `npm --prefix pi-bridge ci`? packaged builds ship it under resources/pi-bridge).",
+                synth_script.display()
             )));
         }
         // Barge-in: kill playback only — the daemon persists across turns.
@@ -475,12 +472,24 @@ pub fn resolve_tts_synth() -> std::path::PathBuf {
         }
     }
     let fallback = std::path::PathBuf::from(
-        "pi-bridge/tts-synth.js (missing — run npm install in pi-bridge)",
+        "pi-bridge/tts-synth.js (missing — run npm --prefix pi-bridge ci)",
     );
     let Ok(exe) = std::env::current_exe() else {
         return fallback;
     };
-    // <repo>/frontend/src/native/target/debug/smartpc-native → up 5 → frontend/
+    // Packaged first: <...>/resources/bin/smartpc-native → up 2 →
+    // resources/ → pi-bridge/tts-synth.js (shipped by electron-builder).
+    // Probed, not assumed: any other layout falls through to dev below.
+    if let Some(staged) = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|d| d.join("pi-bridge").join("tts-synth.js"))
+        .filter(|p| p.is_file())
+    {
+        return staged;
+    }
+    // Dev tree: <repo>/frontend/src/native/target/debug/smartpc-native
+    // → up 5 → frontend/ → pi-bridge/tts-synth.js.
     let mut dir = exe.as_path();
     for _ in 0..5 {
         match dir.parent() {
@@ -489,38 +498,6 @@ pub fn resolve_tts_synth() -> std::path::PathBuf {
         }
     }
     dir.join("pi-bridge").join("tts-synth.js")
-}
-
-/// Resolve the pi-listen voice extension: `PI_VOICE_EXT` wins, else the
-/// vendored copy (`frontend/pi-bridge/node_modules/...`, needs
-/// `npm install` in pi-bridge). The A2 engine no longer spawns it (kept
-/// for diagnostics: the misconfigured error names the old path).
-pub fn resolve_voice_ext() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("PI_VOICE_EXT") {
-        if !p.trim().is_empty() {
-            return std::path::PathBuf::from(p);
-        }
-    }
-    let fallback = std::path::PathBuf::from(
-        "pi-bridge/node_modules/@codexstar/pi-listen/extensions/voice.ts (missing — run npm install in pi-bridge)",
-    );
-    let Ok(exe) = std::env::current_exe() else {
-        return fallback;
-    };
-    // <repo>/frontend/src/native/target/debug/smartpc-native → up 5 → frontend/
-    let mut dir = exe.as_path();
-    for _ in 0..5 {
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return fallback,
-        }
-    }
-    dir.join("pi-bridge")
-        .join("node_modules")
-        .join("@codexstar")
-        .join("pi-listen")
-        .join("extensions")
-        .join("voice.ts")
 }
 
 /// TTS voice catalog (A2). Voice ids are synth ids: plain ids address a
@@ -1222,10 +1199,7 @@ mod tests {
     #[test]
     fn engine_absent_without_synth_script() {
         std::env::set_var("PI_TTS_SYNTH", "/nonexistent-tts-synth-xyz/tts-synth.js");
-        let mgr = TtsManager::new(
-            std::env::temp_dir(),
-            PathBuf::from("/nonexistent-voice-ext-xyz/voice.ts"),
-        );
+        let mgr = TtsManager::new(std::env::temp_dir());
         assert!(!mgr.engine_present());
         assert_eq!(
             resolve_tts_synth(),
@@ -1238,10 +1212,7 @@ mod tests {
     fn install_markers_and_uninstall_roundtrip() {
         let dir = std::env::temp_dir().join(format!("smartpc-tts-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mgr = TtsManager::new(
-            dir.clone(),
-            PathBuf::from("/nonexistent-voice-ext-xyz/voice.ts"),
-        );
+        let mgr = TtsManager::new(dir.clone());
         // Neither marker → not installed.
         assert!(!mgr.model_installed("kitten-nano-en-v0_2"));
         let model_dir = mgr.models_dir().join("kitten-nano-en-v0_2");

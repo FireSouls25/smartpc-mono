@@ -51,10 +51,11 @@ fn home_config_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Does the user's own pi config already authenticate this provider?
+/// Does the app's own pi config already authenticate this provider?
 /// Best-effort presence check (key names only, values never read).
-/// `PI_AUTH_FILE` overrides the path (test hook: e2e isolates ambient
-/// developer auth so the no-key modal path is deterministic).
+/// Path order: `PI_AUTH_FILE` (tests, overrides) → `PI_CODING_AGENT_DIR`
+/// (what main sets per boot, so the check sees the same auth.json the
+/// spawned children use — never the user's own `~/.pi`) → home fallback.
 pub fn pi_auth_has(provider: &str) -> bool {
     let path = match std::env::var("PI_AUTH_FILE")
         .ok()
@@ -62,9 +63,15 @@ pub fn pi_auth_has(provider: &str) -> bool {
         .map(std::path::PathBuf::from)
     {
         Some(p) => p,
-        None => match home_config_dir() {
-            Some(h) => h.join(".pi").join("agent").join("auth.json"),
-            None => return false,
+        None => match std::env::var("PI_CODING_AGENT_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            Some(d) => std::path::PathBuf::from(d).join("auth.json"),
+            None => match home_config_dir() {
+                Some(h) => h.join(".pi").join("agent").join("auth.json"),
+                None => return false,
+            },
         },
     };
     let text = match std::fs::read_to_string(path) {

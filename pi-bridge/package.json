@@ -2,8 +2,9 @@
   "name": "smartpc-pi-bridge",
   "private": true,
   "version": "0.1.0",
-  "description": "Vendored pi extensions spawned by the Smart PC sidecar (smartpc.ts tool bridge; pi-listen for TTS). Installed once via npm install.",
+  "description": "Vendored pi runtime + extensions shipped with the Smart PC app (pi CLI for turns, smartpc.ts tool bridge, tts-synth.js daemon for TTS). Installed once via npm install.",
   "dependencies": {
-    "@codexstar/pi-listen": "^7.2.2"
+    "@earendil-works/pi-coding-agent": "0.87.0",
+    "sherpa-onnx-node": "^1.13.0"
   }
 }

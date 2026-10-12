@@ -92,7 +92,7 @@ pub struct SpeakBody {
     pub voice: Option<String>,
 }
 
-/// Speak text aloud through the pi-listen engine (fire-and-forget: returns
+/// Speak text aloud through the bundled TTS daemon (fire-and-forget: returns
 /// once the utterance is accepted, NOT when audio finishes — extension
 /// commands emit no completion events; a watchdog reaps the player).
 pub async fn speak(
@@ -183,8 +183,8 @@ pub async fn speak(
     }
 }
 
-/// TTS voice catalog. Always 200: empty `models` means the pi-listen voice
-/// extension is missing. `active` is always null — the sidecar stays
+/// TTS voice catalog. Always 200: empty `models` means the TTS daemon is
+/// missing. `active` is always null — the sidecar stays
 /// stateless per call (the renderer keeps its `ttsVoice` pref).
 /// `ready` mirrors the STT `models_ready` shape (per-id download state:
 /// `<tts-home>/.pi/models/tts/<model>/tokens.txt` presence — sid entries

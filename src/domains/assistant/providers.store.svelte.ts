@@ -25,8 +25,12 @@ let activeProvider = $state("");
 let activeModel = $state("");
 let contextWindow = $state<number | null>(null);
 
-/** Fresh accounts have no selection: sending (typed or voice) asks first. */
+/** Fresh accounts have no selection: sending (typed or voice) asks first.
+ * While the initial fetch is in flight the server is the source of truth
+ * (a remembered selection may be arriving) — let the send through and the
+ * backend resolves it or answers no_selection. */
 function requireSelection(): boolean {
+  if (providersLoading) return true;
   if (!activeProvider || !activeModel) {
     selectError = t("chat.noSelection");
     return false;

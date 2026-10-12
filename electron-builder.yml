@@ -23,6 +23,19 @@ files:
 extraResources:
   - from: release/staging/bin
     to: bin
+  # Vendored pi runtime (CLI + bridge + TTS daemon). The sidecar resolves
+  # it under resources/pi-bridge and spawns the CLI via the local node.
+  # Staged pruned per platform by scripts/build-release.mjs (step 3b).
+  # Deps ride in pi-bridge-deps (NOT pi-bridge/node_modules): electron-builder
+  # hard-drops a root node_modules under extraResources `from`, so the deps
+  # are staged flat and mapped back to pi-bridge/node_modules via `to:`.
+  - from: release/staging/pi-bridge
+    to: pi-bridge
+    filter:
+      - "**/*"
+      - "!**/*.test.js"
+  - from: release/staging/pi-bridge-deps
+    to: pi-bridge/node_modules
 
 asar: true
 

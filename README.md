@@ -42,6 +42,7 @@ docs/             current-state docs (see docs/README.md)
 
 ```bash
 npm install
+npm --prefix pi-bridge ci   # vendored pi CLI + TTS engine (shipped with the app)
 npm run dev:electron   # builds sidecar, starts vite + Electron (all-in-one)
 ```
 
@@ -102,10 +103,11 @@ Installers land in `release/out/` (`smartpc-linux-<arch>.AppImage` +
 - Native build deps are required for the sidecar step (it compiles
   whisper.cpp): `cmake`, a C++ compiler, and `libasound2-dev` on Linux —
   the same list CI installs.
-- Only `dist/`, `electron/` and the sidecar are packaged. The pi agent
-  harness is **not** bundled (it needs a local `pi` install plus
-  `pi-bridge/node_modules`, 232 MB); the app still starts without it and
-  says so in the terminal.
+- Only `dist/`, `electron/`, the sidecar and `pi-bridge` are packaged.
+  The pi CLI ships under `resources/pi-bridge` (pruned per platform) and
+  runs under the app's own `PI_CODING_AGENT_DIR`, so it never touches the
+  user's own `~/.pi`. A node runtime is still required on the target
+  machine (the pi CLI and the TTS daemon spawn via node).
 - Unsigned: macOS output opens with a Gatekeeper warning until you sign and
   notarize it.
 

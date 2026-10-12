@@ -134,6 +134,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // Our pi children (and only they) live under the app's own agent dir:
+    // auth.json, themes and settings never touch the user's own `~/.pi`.
+    // Set on our own process so every spawned child inherits it; the
+    // catalog check (`pi_auth_has`) reads the same location.
+    // `PI_AUTH_FILE` still wins wherever it is set (tests, overrides).
+    // Explicit `PI_CODING_AGENT_DIR` (power users) is respected as-is.
+    if std::env::var("PI_CODING_AGENT_DIR").is_err() {
+        std::env::set_var("PI_CODING_AGENT_DIR", data_dir.join("pi-home"));
+    }
     let models_dir = std::env::var("WHISPER_MODEL_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("models"));
@@ -183,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store: Arc::new(Mutex::new(store)),
         chat: Arc::new(Mutex::new(chat_store)),
         voice: crate::stt::VoiceService::new(models_dir),
-        tts: crate::tts::TtsManager::new(data_dir.clone(), crate::tts::resolve_voice_ext()),
+        tts: crate::tts::TtsManager::new(data_dir.clone()),
         pi,
         cloud,
         jwt_secret: Arc::new(jwt_secret),

@@ -134,22 +134,67 @@ impl PiSupervisor {
         format!("{prefix}-{}", self.id_counter.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Resolve the pi executable: `PI_BIN` override, else npx-pinned package.
+    /// Vendored pi CLI (`pi-bridge/node_modules/.../dist/bundle/cli.js`),
+    /// shipped inside resources/ by electron-builder or present in the dev
+    /// tree. Running our own copy (instead of whatever `pi` the user may
+    /// have) is what keeps app turns independent of the user's pi install.
+    pub(crate) fn vendored_pi_cli() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // Packaged: <...>/resources/bin/smartpc-native → up 2 → resources/.
+        // Dev: <repo>/frontend/src/native/target/<profile>/smartpc-native
+        // → up 5 → frontend/. Probed, not assumed.
+        let roots = [
+            exe.parent()
+                .and_then(|d| d.parent())
+                .map(|d| d.to_path_buf()),
+            {
+                let mut dir = exe.as_path();
+                for _ in 0..5 {
+                    dir = dir.parent()?;
+                }
+                Some(dir.to_path_buf())
+            },
+        ];
+        for root in roots.into_iter().flatten() {
+            let cli = root
+                .join("pi-bridge")
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("bundle")
+                .join("cli.js");
+            if cli.is_file() {
+                return Some(cli);
+            }
+        }
+        None
+    }
+
+    /// Resolve the pi executable: `PI_BIN` override, else the vendored CLI
+    /// via the local node, else the npx-pinned package (needs network +
+    /// npm at runtime — dev fallback when pi-bridge was never installed).
     /// Returns (bin, leading_args) so spawn appends pi flags after.
     /// Shared by the agent supervisor and the TTS manager.
     pub(crate) fn pi_command() -> (String, Vec<String>) {
-        match std::env::var("PI_BIN").ok().filter(|v| !v.trim().is_empty()) {
-            Some(bin) => (bin, Vec::new()),
-            None => (
-                "npx".to_string(),
-                vec![
-                    "-y".to_string(),
-                    "-p".to_string(),
-                    super::PI_PACKAGE.to_string(),
-                    "pi".to_string(),
-                ],
-            ),
+        if let Some(bin) = std::env::var("PI_BIN").ok().filter(|v| !v.trim().is_empty()) {
+            return (bin, Vec::new());
         }
+        if let Some(cli) = Self::vendored_pi_cli() {
+            return (
+                "node".to_string(),
+                vec![cli.to_string_lossy().to_string()],
+            );
+        }
+        (
+            "npx".to_string(),
+            vec![
+                "-y".to_string(),
+                "-p".to_string(),
+                super::PI_PACKAGE.to_string(),
+                "pi".to_string(),
+            ],
+        )
     }
 
     /// Child for a sidecar user (per-user env for key injection).
@@ -584,10 +629,10 @@ impl ChildHandle {
     }
 }
 
-/// Resolve the bridge extension file: `PI_BRIDGE` wins, else the dev tree
-/// relative to the running binary (`.../src/native/target/debug/` → repo
-/// `frontend/pi-bridge/smartpc.ts`). Packaged builds must set PI_BRIDGE
-/// (or ship the file next to resources — wired at packaging time).
+/// Resolve the bridge extension file: `PI_BRIDGE` wins, else the packaged
+/// copy (`<...>/resources/pi-bridge/smartpc.ts`, shipped by
+/// electron-builder), else the dev tree relative to the running binary
+/// (`.../src/native/target/debug/` → repo `frontend/pi-bridge/smartpc.ts`).
 pub fn resolve_bridge() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("PI_BRIDGE") {
         if !p.trim().is_empty() {
@@ -596,6 +641,15 @@ pub fn resolve_bridge() -> Result<PathBuf, String> {
     }
     let exe = std::env::current_exe()
         .map_err(|e| format!("current exe unknown: {e}"))?;
+    // Packaged: <...>/resources/bin/smartpc-native → up 2 → resources/.
+    if let Some(staged) = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .map(|d| d.join("pi-bridge").join("smartpc.ts"))
+        .filter(|p| p.is_file())
+    {
+        return Ok(staged);
+    }
     // <repo>/frontend/src/native/target/debug/smartpc-native → up 5 → frontend/
     let mut dir = exe.as_path();
     for _ in 0..5 {
@@ -630,13 +684,27 @@ mod tests {
     }
 
     #[test]
-    fn pi_command_defaults_to_pinned_npx() {
+    fn pi_command_prefers_vendored_cli_over_npx() {
+        // This repo vendors pi (pi-bridge/node_modules): with no override
+        // the sidecar must run its own copy, never whatever `pi` (if any)
+        // the user's PATH or npx cache holds.
         let prev = std::env::var("PI_BIN").ok();
         std::env::remove_var("PI_BIN");
         let (bin, args) = PiSupervisor::pi_command();
-        assert_eq!(bin, "npx");
-        assert!(args.iter().any(|a| a == "-p"));
-        assert!(args.iter().any(|a| a == super::super::PI_PACKAGE));
+        let vendored = PiSupervisor::vendored_pi_cli();
+        match vendored {
+            Some(cli) => {
+                assert_eq!(bin, "node");
+                assert!(args.iter().any(|a| a == &cli.to_string_lossy()));
+            }
+            None => {
+                // pi-bridge never installed here: npx fallback (needs
+                // network + npm — dev-only path, never packaged).
+                assert_eq!(bin, "npx");
+                assert!(args.iter().any(|a| a == "-p"));
+                assert!(args.iter().any(|a| a == super::super::PI_PACKAGE));
+            }
+        }
         match prev {
             Some(v) => std::env::set_var("PI_BIN", v),
             None => std::env::remove_var("PI_BIN"),

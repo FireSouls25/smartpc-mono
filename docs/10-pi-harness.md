@@ -110,10 +110,13 @@ renderer ──HTTP──► sidecar ──stdio JSONL──► pi --mode rpc
   actions" invariant is replaced by "read-only turns create none".
 - **Abort/stop**: UI stop → RPC `abort`. Delete-session → drop mapping
   (+ optional pi session file cleanup, best-effort).
-- **Distribution (v1)**: require `pi` + `node` on PATH at sidecar boot;
-  clear `misconfigured` error otherwise (Electron dialog already exists for
-  backend failures). Packaged fallback later: `npx -y <pinned pi>` (npm
-  cache) — no code change, spawn-command switch.
+- **Distribution (v1)**: the pi CLI ships vendored under
+  `resources/pi-bridge` (staged pruned per platform by
+  `scripts/build-release.mjs`) and spawns via the local node — `node` is
+  still required on PATH. Resolution order: `PI_BIN` override → vendored
+  copy → `npx -y <pinned pi>` fallback (dev without pi-bridge installed).
+  The app owns its agent dir (`PI_CODING_AGENT_DIR=<db-dir>/pi-home`), so
+  auth/themes/settings never touch the user's own `~/.pi`.
 
 ## Rollout (behind `PI_HARNESS=1`, default off)
 

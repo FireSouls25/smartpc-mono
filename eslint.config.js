@@ -8,6 +8,7 @@ export default [
   {
     ignores: [
       "dist/**",
+      "release/**",
       "test-results/**",
       "src/native/target/**",
       "lancedb/**",

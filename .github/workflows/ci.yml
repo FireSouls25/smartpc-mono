@@ -33,6 +33,18 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      # Vendored pi CLI + TTS engine: the contract spec boots a real
+      # sidecar, which now spawns the vendored copy (no npx fallback in
+      # CI). Cached: the tree is several hundred MB of npm payload.
+      - name: Cache pi-bridge deps
+        uses: actions/cache@v4
+        id: pi-bridge
+        with:
+          path: pi-bridge/node_modules
+          key: pi-bridge-${{ runner.os }}-${{ hashFiles('pi-bridge/package-lock.json') }}
+      - name: Install pi-bridge deps
+        if: steps.pi-bridge.outputs.cache-hit != 'true'
+        run: npm --prefix pi-bridge ci --no-audit --no-fund
       # Types + lint + format + unit; then sidecar suite + contract
       # (the contract spec spawns its own sidecar, no browsers needed).
       - run: npm run verify
@@ -58,6 +70,15 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: Cache pi-bridge deps
+        uses: actions/cache@v4
+        id: pi-bridge
+        with:
+          path: pi-bridge/node_modules
+          key: pi-bridge-${{ runner.os }}-${{ hashFiles('pi-bridge/package-lock.json') }}
+      - name: Install pi-bridge deps
+        if: steps.pi-bridge.outputs.cache-hit != 'true'
+        run: npm --prefix pi-bridge ci --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
       # Fast path only: @slow (real model inference) stays local.
       - run: npm run test:e2e

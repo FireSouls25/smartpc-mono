@@ -141,7 +141,9 @@
           class="flex items-center justify-between gap-2 font-semibold"
           style="color: var(--fg);"
         >
-          {#if providers.activeProvider}
+          {#if providers.providersLoading && !providers.activeProvider}
+            <span class="truncate" style="color: var(--fg-faint);">…</span>
+          {:else if providers.activeProvider}
             <span class="truncate"
               >{providers.activeModel || t("chat.choose")}</span
             >
@@ -464,7 +466,7 @@
       </p>
     {/if}
 
-    {#if !providers.activeProvider || !providers.activeModel}
+    {#if !providers.providersLoading && (!providers.activeProvider || !providers.activeModel)}
       <p class="chip" style="border-color: var(--accent); color: var(--fg);">
         {t("chat.noSelection")}
       </p>
