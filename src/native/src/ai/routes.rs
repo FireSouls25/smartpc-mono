@@ -85,7 +85,7 @@ pub async fn start_provider(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if id.trim() == "llama.cpp" {
+    if id.trim() == crate::ai::local::MANAGED_ID {
         if s.llm.serving().is_some() {
             return (
                 StatusCode::OK,
@@ -168,7 +168,17 @@ mod tests {
     #[test]
     fn resolves_known_providers() {
         assert_eq!(Provider::resolve("ollama").unwrap().name(), "ollama");
-        assert_eq!(Provider::resolve("llama.cpp").unwrap().name(), "llama.cpp");
+        assert_eq!(
+            Provider::resolve(crate::ai::local::MANAGED_ID).unwrap().name(),
+            crate::ai::local::MANAGED_ID
+        );
+        // Pre-rename stored ids keep resolving to the managed provider.
+        for legacy in crate::ai::local::LEGACY_IDS {
+            assert_eq!(
+                Provider::resolve(legacy).unwrap().name(),
+                crate::ai::local::MANAGED_ID
+            );
+        }
         assert!(Provider::resolve("nope").is_err());
     }
 }

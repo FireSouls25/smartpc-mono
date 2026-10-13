@@ -95,7 +95,7 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-pub async fn bootstrap(State(_s): State<AppState>) -> impl IntoResponse {
+pub async fn bootstrap(State(s): State<AppState>) -> impl IntoResponse {
     // Ollama: live model list (same probe the UI uses).
     let ollama_models: Vec<serde_json::Value> = match Provider::resolve("ollama") {
         Ok(p) => match p.models().await {
@@ -114,9 +114,25 @@ pub async fn bootstrap(State(_s): State<AppState>) -> impl IntoResponse {
         },
         Err(_) => Vec::new(),
     };
-    // llama.cpp serves one loaded model: the name is a label (same
+    // llama-server serves one loaded model: the name is a label (same
     // semantics as the native path). Only `id` is required per model.
-    let llama_model = env_or("LLAMACPP_MODEL", "default");
+    // Two entries share the engine but never the address: `smartpc` aims
+    // at OUR managed server (live port when up; a guaranteed-dead
+    // placeholder otherwise — every boot/switch drops pi children so the
+    // respawn re-registers the fresh URL), `llamacpp` at the user's own
+    // (env or default port; we never spawn, kill, or steal it).
+    let smartpc_models: Vec<serde_json::Value> = match s.llm.serving() {
+        // Turns only reach pi after the guard boots our server (and every
+        // boot drops children, so the respawn re-registers fresh): the
+        // down-state list stays empty rather than advertising a guess.
+        Some((_, alias)) => vec![serde_json::json!({ "id": alias })],
+        None => Vec::new(),
+    };
+    let smartpc_base = match s.llm.serving() {
+        Some((port, _)) => format!("http://127.0.0.1:{port}/v1"),
+        // Port 9 (discard): refuses fast instead of hanging a turn.
+        None => "http://127.0.0.1:9/v1".to_string(),
+    };
     let providers = serde_json::json!([
         {
             "id": "ollama",
@@ -126,11 +142,18 @@ pub async fn bootstrap(State(_s): State<AppState>) -> impl IntoResponse {
             "models": ollama_models,
         },
         {
+            "id": "smartpc",
+            "baseUrl": smartpc_base,
+            "apiKey": "smartpc",
+            "api": "openai-completions",
+            "models": smartpc_models,
+        },
+        {
             "id": "llamacpp",
             "baseUrl": env_or("LLAMACPP_URL", "http://127.0.0.1:8080/v1"),
             "apiKey": "llamacpp",
             "api": "openai-completions",
-            "models": [{ "id": llama_model }],
+            "models": [{ "id": env_or("LLAMACPP_MODEL", "default") }],
         },
     ]);
     Json(serde_json::json!({ "providers": providers }))

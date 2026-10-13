@@ -184,7 +184,7 @@ export const es = {
   "settings.account": "Cuenta",
   "settings.history": "Historial",
   "settings.models": "Modelos locales",
-  "chat.getLocalModel": "Descargar un modelo local",
+  "chat.useSmartpc": "Usar modelos de Smart PC",
   "localmodels.note":
     "Modelos servidos por nuestro propio llama-server: sin Ollama ni claves. La primera vez se descargan (~2,5 GB cada uno, reanudable y verificado).",
   "localmodels.external":
@@ -200,6 +200,9 @@ export const es = {
     "Borra el archivo descargado (se puede volver a descargar).",
   "localmodels.use": "Usar",
   "localmodels.starting": "Iniciando…",
+  "localmodels.serverReady": "Servidor local incluido.",
+  "localmodels.serverFetch":
+    "Servidor local: se descarga solo (~18 MB) al usar el primer modelo.",
   "settings.historyNote":
     "Tus conversaciones guardadas. Abrir una la muestra en el chat sin cambiar tu modelo; eliminarla la borra para siempre.",
   "settings.providerNote": "Solo se pueden elegir proveedores detectados.",

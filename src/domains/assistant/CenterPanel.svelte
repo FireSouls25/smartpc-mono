@@ -476,7 +476,7 @@
         style="border-color: var(--accent); color: var(--fg);"
         onclick={() => navigate("settings/5")}
       >
-        {t("chat.getLocalModel")}
+        {t("chat.useSmartpc")}
       </button>
     {/if}
     <div class="flex flex-wrap items-center gap-2">

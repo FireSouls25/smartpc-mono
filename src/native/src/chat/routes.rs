@@ -40,7 +40,7 @@ pub struct CreateSessionBody {
 
 #[derive(Deserialize)]
 pub struct SelectBody {
-    /// "ollama" | "llama.cpp" (aliases: llamacpp, llama-cpp)
+    /// "smartpc" (our managed local models) | "ollama" | pi registry ids.
     pub provider: String,
     pub model: Option<String>,
 }

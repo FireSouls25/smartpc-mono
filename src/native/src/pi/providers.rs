@@ -84,9 +84,13 @@ pub fn pi_auth_has(provider: &str) -> bool {
         .is_some_and(|v| !(v.is_null() || v == Value::String(String::new())))
 }
 
-/// Loopback providers never need keys through us.
+/// Loopback providers never need keys through us. `smartpc` is our own
+/// managed provider; the `llama.*` spellings are pre-rename stored values
+/// that resolve identically.
 pub(crate) fn is_local_provider(id: &str) -> bool {
-    matches!(id, "ollama" | "llamacpp" | "llama.cpp" | "llama-cpp")
+    id == crate::ai::local::MANAGED_ID
+        || crate::ai::local::LEGACY_IDS.contains(&id)
+        || id == "ollama"
 }
 
 pub fn is_loopback_url(base_url: Option<&str>) -> bool {
@@ -181,25 +185,29 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
     };
     let mut out = Vec::new();
     // Local-first behavior bit-identical to the native path.
-    let (ollama, llamacpp) =
-        tokio::join!(crate::ai::routes::probe("ollama"), crate::ai::routes::probe("llama.cpp"));
+    // `smartpc` is built below from managed state (never the env probe:
+    // the user's own server must not leak into our entry); `llama.cpp`
+    // stays the legacy env-based entry for user-run servers.
+    let (ollama, legacy) = tokio::join!(
+        crate::ai::routes::probe("ollama"),
+        crate::ai::routes::probe("llama.cpp")
+    );
+    let (managed_available, managed_models) = state.llm.managed_status().await;
+    out.push(serde_json::json!({
+        "id": crate::ai::local::MANAGED_ID,
+        "name": crate::ai::local::MANAGED_ID,
+        "available": managed_available,
+        "models": managed_models,
+        "default_model": "",
+        "needs_key": false,
+        "key_paste": false,
+        // Curated GGUFs load with an 8k window (our spawn flag).
+        "context_window": 8192,
+        "startable": true,
+        "installed": state.llm.binary_present(),
+    }));
     out.push(ollama);
-    out.push(llamacpp);
-    // llama.cpp is app-managed (see ai::local): startable through the
-    // models view / start endpoint, installed = server binary present.
-    // `available` stays the live probe (our server answering, or the
-    // user's own on the default port).
-    if let Some(obj) = out
-        .iter_mut()
-        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some("llama.cpp"))
-        .and_then(|v| v.as_object_mut())
-    {
-        obj.insert("startable".to_string(), serde_json::Value::Bool(true));
-        obj.insert(
-            "installed".to_string(),
-            serde_json::Value::Bool(state.llm.binary_present()),
-        );
-    }
+    out.push(legacy);
     let mut live_ids: Vec<String> = Vec::new();
     for (id, group) in group_by_provider(&models) {
         if is_local_provider(&id) {
@@ -255,28 +263,29 @@ fn append_snapshot_entries(out: &mut Vec<Value>, live_ids: &[String]) {
 }
 
 async fn fallback() -> Vec<Value> {
-    let (ollama, llamacpp, opencode) = tokio::join!(
+    let (ollama, legacy, opencode) = tokio::join!(
         crate::ai::routes::probe("ollama"),
         crate::ai::routes::probe("llama.cpp"),
         crate::ai::routes::probe("opencode"),
     );
-    let mut out = vec![ollama, llamacpp, opencode];
-    // Same managed override as the live catalog (stateless half: the
-    // packaged binary probe needs no AppState).
-    if let Some(obj) = out
-        .iter_mut()
-        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some("llama.cpp"))
-        .and_then(|v| v.as_object_mut())
-    {
-        obj.insert("startable".to_string(), serde_json::Value::Bool(true));
-        obj.insert(
-            "installed".to_string(),
-            serde_json::Value::Bool(
-                crate::ai::local::LocalLlm::packaged_server_binary().is_some(),
-            ),
-        );
-    }
-    let live_ids = ["ollama", "llama.cpp", "opencode"]
+    let mut out = vec![
+        serde_json::json!({
+            "id": crate::ai::local::MANAGED_ID,
+            "name": crate::ai::local::MANAGED_ID,
+            "available": false,
+            "models": [],
+            "default_model": "",
+            "needs_key": false,
+            "key_paste": false,
+            "context_window": 8192,
+            "startable": true,
+            "installed": crate::ai::local::LocalLlm::packaged_server_binary().is_some(),
+        }),
+        ollama,
+        legacy,
+        opencode,
+    ];
+    let live_ids = ["ollama", crate::ai::local::MANAGED_ID, "opencode"]
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
@@ -354,6 +363,7 @@ mod tests {
         assert!(is_local_provider("ollama"));
         assert!(is_local_provider("llamacpp"));
         assert!(is_local_provider("llama.cpp"));
+        assert!(is_local_provider(crate::ai::local::MANAGED_ID));
         assert!(!is_local_provider("opencode"));
         assert!(!is_local_provider("anthropic"));
         assert!(is_loopback_url(Some("http://127.0.0.1:11434/v1")));

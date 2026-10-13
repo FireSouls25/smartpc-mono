@@ -463,6 +463,24 @@ impl PiSupervisor {
         }
     }
 
+    /// Kill every cached child and forget them; next use respawns each.
+    /// Used when the managed llama-server changes port (boot/switch):
+    /// pi registers provider base URLs once per child spawn, so a stale
+    /// child would keep aiming at the dead port. Switches are rare; a
+    /// respawn costs seconds and pi session files survive it.
+    pub async fn drop_all_children(&self) {
+        let handles = {
+            let mut children = self.children.lock().await;
+            std::mem::take(&mut *children)
+        };
+        for (_, h) in handles {
+            h.exited.store(true, Ordering::Relaxed);
+            if let Ok(mut proc) = h.proc.try_lock() {
+                let _ = proc.start_kill();
+            }
+        }
+    }
+
     /// Flag the in-flight turn (if any) for cancellation. Idempotent:
     /// no child or no turn still answers ok. The turn loop aborts pi and
     /// unwinds on its next tick, freeing the per-user turn lock.

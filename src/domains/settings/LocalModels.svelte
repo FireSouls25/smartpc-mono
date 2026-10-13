@@ -16,14 +16,23 @@
 
   const pct = (done: number, total: number) =>
     total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  // Our own provider id (backend ai::local::MANAGED_ID): the active pick
+  // lives here when the user chose a managed model.
   const activeId = () =>
-    providers.activeProvider === "llama.cpp" ? providers.activeModel : "";
+    providers.activeProvider === "smartpc" ? providers.activeModel : "";
 </script>
 
 <div class="flex flex-col gap-4">
   <p class="muted text-sm">{t("localmodels.note")}</p>
   {#if llm.externalServer}
     <p class="warn-box">{t("localmodels.external")}</p>
+  {/if}
+  {#if !llm.externalServer}
+    <p class="faint mono text-[11px]">
+      {llm.binaryPresent
+        ? t("localmodels.serverReady")
+        : t("localmodels.serverFetch")}
+    </p>
   {/if}
   {#if llm.error}
     <p class="error-box">{llm.error}</p>

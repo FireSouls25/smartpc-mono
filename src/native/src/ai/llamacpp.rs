@@ -50,7 +50,9 @@ impl LlamaCpp {
 
 impl LlmProvider for LlamaCpp {
     fn name(&self) -> &'static str {
-        "llama.cpp"
+        // User-facing id is our own provider (see ai::local::MANAGED_ID);
+        // the engine underneath stays llama.cpp.
+        super::local::MANAGED_ID
     }
 
     fn default_model(&self) -> &str {

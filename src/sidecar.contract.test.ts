@@ -106,11 +106,15 @@ describe("sidecar contract", () => {
       providers: Record<string, unknown>[];
     };
     const ids = body.providers.map((p) => p["id"]).sort();
-    // Loopback trio always present; the rest is pi's registry (snapshot ids
-    // are in-repo, so this is deterministic — live groups only add more).
-    for (const id of ["llama.cpp", "ollama", "opencode"]) {
+    // Loopback trio always present (smartpc = our managed local models);
+    // the rest is pi's registry (snapshot ids are in-repo, so this is
+    // deterministic — live groups only add more).
+    for (const id of ["smartpc", "ollama", "opencode"]) {
       expect(ids).toContain(id);
     }
+    // The user's own llama-server keeps its separate entry (external,
+    // never started or killed by us).
+    expect(ids).toContain("llama.cpp");
     for (const id of ["anthropic", "openai", "google", "mistral", "groq"]) {
       expect(ids).toContain(id);
     }
@@ -200,7 +204,7 @@ describe("sidecar contract", () => {
       "unknown_model",
     );
     // Nothing downloaded here: starting fails closed, never implicitly.
-    const start = await fetch(`${BASE}/v1/ai/providers/llama.cpp/start`, {
+    const start = await fetch(`${BASE}/v1/ai/providers/smartpc/start`, {
       method: "POST",
       headers: gate,
     });
@@ -497,10 +501,10 @@ describe("sidecar contract", () => {
     expect(body.error.code).toBe("not_startable");
   });
 
-  test("managed llama.cpp start fails closed without downloads", async () => {
+  test("managed smartpc start fails closed without downloads", async () => {
     // Fresh temp db: no curated model on disk → explicit no_model, never
     // an implicit multi-GB pull.
-    const res = await fetch(`${BASE}/v1/ai/providers/llama.cpp/start`, {
+    const res = await fetch(`${BASE}/v1/ai/providers/smartpc/start`, {
       method: "POST",
       headers: gate,
     });

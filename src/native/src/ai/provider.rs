@@ -73,7 +73,9 @@ impl ProviderError {
             ProviderError::UnknownProvider(name) => (
                 400,
                 "unknown_provider",
-                format!("unknown provider: {name} (try ollama, llama.cpp, opencode)"),
+                format!(
+                    "unknown provider: {name} (try smartpc, ollama, opencode)"
+                ),
             ),
             ProviderError::MissingModel => (
                 400,
@@ -117,11 +119,13 @@ impl Provider {
     }
 
     pub fn resolve_with_key(name: &str, key: Option<String>) -> Result<Self, ProviderError> {
+        // Our own provider id; legacy vendor ids keep resolving so
+        // stored selections and sessions from earlier builds survive.
+        if super::local::is_managed_id(name) {
+            return Ok(Self::LlamaCpp(super::llamacpp::LlamaCpp::new()?));
+        }
         match name {
             "ollama" => Ok(Self::Ollama(super::ollama::Ollama::new()?)),
-            "llama.cpp" | "llamacpp" | "llama-cpp" => {
-                Ok(Self::LlamaCpp(super::llamacpp::LlamaCpp::new()?))
-            }
             "opencode" => {
                 let mut p = super::opencode::OpenCodeCompat::new()?;
                 p.set_api_key(key);

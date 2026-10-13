@@ -1,7 +1,5 @@
 <script lang="ts">
   import { chatStore as chat } from "./chat.store.svelte";
-  import { providerStore as providers } from "./providers.store.svelte";
-  import { contextPct, fmtK } from "../../lib/format";
   import { t } from "../../lib/i18n.svelte";
 
   type Filter = "all" | "running" | "done" | "failed";
@@ -42,17 +40,6 @@
     if (status === "failed") return t("events.failed");
     return t("events.done");
   }
-
-  function ctxPct(): number {
-    return contextPct(chat.contextUsed, providers.contextWindow);
-  }
-
-  function ctxColor(): string {
-    const p = ctxPct();
-    if (p >= 90) return "var(--danger)";
-    if (p >= 70) return "var(--warn)";
-    return "var(--accent)";
-  }
 </script>
 
 <aside class="card-xl flex h-full min-h-[240px] min-h-0 flex-col">
@@ -89,30 +76,6 @@
     {/each}
   </div>
   <div class="panel-body min-h-0 flex-1">
-    <div
-      class="shrink-0 border px-2 py-1.5"
-      style="border-color: var(--border); background: var(--crust);"
-    >
-      <div class="flex items-center justify-between gap-2">
-        <p class="hud-label">{t("context.label")}</p>
-        <p class="mono text-[11px]">
-          {fmtK(chat.contextUsed)} / {providers.contextWindow == null
-            ? "—"
-            : fmtK(providers.contextWindow)}
-        </p>
-      </div>
-      {#if providers.contextWindow != null}
-        <div
-          class="mt-1.5 h-1 overflow-hidden"
-          style="background: var(--border);"
-        >
-          <div
-            class="h-full transition-all"
-            style="width: {ctxPct()}%; background: {ctxColor()};"
-          ></div>
-        </div>
-      {/if}
-    </div>
     {#if visible().length === 0}
       <p class="faint px-1 text-xs leading-relaxed">{t("events.empty")}</p>
     {/if}

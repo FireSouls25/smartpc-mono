@@ -26,16 +26,40 @@ use std::sync::{
 };
 
 /// Pinned llama.cpp build (nightly tag — versioned tags carry no binaries).
+/// Single source of truth for the server asset URLs below.
 pub const LLAMA_BUILD: &str = "b11429";
+
+/// Our own provider id for app-managed local models. The engine underneath
+/// is llama.cpp (`super::llamacpp`), but users pick "Smart PC" — never a
+/// vendor name, never a preselected default.
+pub const MANAGED_ID: &str = "smartpc";
+
+/// Pre-rename ids: still resolve and boot exactly like `MANAGED_ID` so
+/// stored selections and sessions from earlier builds keep working.
+/// New picks always persist `MANAGED_ID`.
+pub const LEGACY_IDS: &[&str] = &["llama.cpp", "llamacpp", "llama-cpp"];
+
+/// Canonical id or a legacy alias.
+pub fn is_managed_id(id: &str) -> bool {
+    id == MANAGED_ID || LEGACY_IDS.contains(&id)
+}
 
 /// CPU server archive for one OS/arch, with GitHub's own sha256.
 pub struct ServerAsset {
     pub file: &'static str,
-    pub url: &'static str,
     pub size: u64,
     pub sha256: &'static str,
     /// extra suffix for the extracted binary name on this OS.
     pub exe_suffix: &'static str,
+}
+
+impl ServerAsset {
+    pub fn url(&self) -> String {
+        format!(
+            "https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/{}",
+            self.file
+        )
+    }
 }
 
 /// Pinned per-OS asset. Platforms outside the release matrix resolve to
@@ -45,7 +69,6 @@ pub fn server_asset() -> Option<ServerAsset> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return Some(ServerAsset {
         file: "llama-b11429-bin-ubuntu-x64.tar.gz",
-        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11429/llama-b11429-bin-ubuntu-x64.tar.gz",
         size: 17_693_462,
         sha256: "f6d25dde8f51133143d1453da4fd5f73b145127177612a283bf7995957af3392",
         exe_suffix: "",
@@ -53,7 +76,6 @@ pub fn server_asset() -> Option<ServerAsset> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     return Some(ServerAsset {
         file: "llama-b11429-bin-macos-arm64.tar.gz",
-        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11429/llama-b11429-bin-macos-arm64.tar.gz",
         size: 11_971_406,
         sha256: "740288ec6887be94280a5dfa25b5e23a78285cab104519e6c7e218904ee82459",
         exe_suffix: "",
@@ -61,7 +83,6 @@ pub fn server_asset() -> Option<ServerAsset> {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Some(ServerAsset {
         file: "llama-b11429-bin-win-cpu-x64.zip",
-        url: "https://github.com/ggml-org/llama.cpp/releases/download/b11429/llama-b11429-bin-win-cpu-x64.zip",
         size: 19_398_918,
         sha256: "1283323272b04cd07905816a597a0da810918102de958f4ff6f7bbaa70ed2efe",
         exe_suffix: ".exe",
@@ -125,7 +146,6 @@ pub fn external_server() -> bool {
 }
 
 struct DownloadProgress {
-    total: u64,
     done: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
 }
@@ -238,6 +258,18 @@ impl LocalLlm {
             .map(|s| (s.port, s.model.clone()))
     }
 
+    /// Managed-only liveness for the `smartpc` catalog entry: true only
+    /// when OUR server answers (never the user's own on the default port).
+    /// Returns `(available, models)` with the serving alias, or empties.
+    pub async fn managed_status(&self) -> (bool, Vec<String>) {
+        match self.serving() {
+            Some((port, model)) if server_answers(port).await => {
+                (true, vec![model])
+            }
+            _ => (false, Vec::new()),
+        }
+    }
+
     fn server_url(port: u16) -> String {
         format!("http://127.0.0.1:{port}")
     }
@@ -290,7 +322,6 @@ impl LocalLlm {
             errs.remove(id);
         }
         let progress = Arc::new(DownloadProgress {
-            total: entry.size,
             done: Arc::new(AtomicU64::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
         });
@@ -466,7 +497,7 @@ impl LocalLlm {
         })?;
         std::fs::create_dir_all(self.bin_dir()).map_err(|e| e.to_string())?;
         let archive = self.bin_dir().join(asset.file);
-        download_file(&asset.url, &archive, asset.size, Some(asset.sha256)).await?;
+        download_file(&asset.url(), &archive, asset.size, Some(asset.sha256)).await?;
         let bin = extract_server_binary(&archive, &self.bin_dir(), asset.exe_suffix)?;
         #[cfg(unix)]
         {
@@ -972,12 +1003,16 @@ pub async fn use_model(
             axum::http::StatusCode::BAD_REQUEST,
         );
     }
+    let before = s.llm.serving().map(|(port, _)| port);
     if let Err(e) = s.llm.start(entry.id).await {
         return bad("start_failed", e, axum::http::StatusCode::BAD_GATEWAY);
     }
+    if s.llm.serving().map(|(port, _)| port) != before {
+        s.pi.drop_all_children().await;
+    }
     // Persist exactly like a manual select (same store row, same cloud fan-out).
     let selection = crate::chat::model::Selection {
-        provider: "llama.cpp".to_string(),
+        provider: MANAGED_ID.to_string(),
         model: Some(entry.id.to_string()),
     };
     let stored = s.chat.lock().map_err(|_| ()).and_then(|store| {
@@ -1002,7 +1037,7 @@ pub async fn use_model(
         axum::http::StatusCode::OK,
         axum::Json(serde_json::json!({
             "ok": true,
-            "provider": "llama.cpp",
+            "provider": MANAGED_ID,
             "model": entry.id,
         })),
     )
@@ -1021,7 +1056,9 @@ pub async fn ensure_serving_for(
     provider: &str,
     model: &str,
 ) -> Option<axum::response::Response> {
-    if provider != "llama.cpp" || external_server() {
+    // Only our own id auto-boots: legacy `llama.cpp` rows address the
+    // user's own server directly (a separate catalog entry).
+    if provider != MANAGED_ID || external_server() {
         return None;
     }
     if catalog_entry(model).is_none() || !s.llm.model_ready(model) {
@@ -1030,8 +1067,18 @@ pub async fn ensure_serving_for(
     if s.llm.serving().is_some_and(|(_, m)| m == model) {
         return None;
     }
+    let before = s.llm.serving().map(|(port, _)| port);
     match s.llm.start(model).await {
-        Ok(_) => None,
+        Ok((port, _)) => {
+            // A new port invalidates every pi child's registered base
+            // URL (bootstrap runs once per spawn): drop them on change
+            // only, so the next turn respawns against the fresh server.
+            // Reuse keeps children (and their sessions) untouched.
+            if Some(port) != before {
+                s.pi.drop_all_children().await;
+            }
+            None
+        }
         Err(e) => Some(bad(
             "start_failed",
             e,
@@ -1046,7 +1093,7 @@ fn clear_llm_selection(s: &crate::api::AppState, uid: &str, model: &str) {
         .lock()
         .ok()
         .and_then(|store| store.get_selection(uid).ok().flatten())
-        .is_some_and(|sel| sel.provider == "llama.cpp" && sel.model.as_deref() == Some(model));
+        .is_some_and(|sel| sel.provider == MANAGED_ID && sel.model.as_deref() == Some(model));
     if matches {
         // Selection rows are (user, provider, model): deleting our own
         // managed pick resets to unselected (fresh-account behavior).
@@ -1078,7 +1125,7 @@ mod tests {
     #[test]
     fn server_asset_urls_are_shaped() {
         if let Some(a) = server_asset() {
-            assert!(a.url.starts_with("https://github.com/ggml-org/llama.cpp"));
+            assert!(a.url().starts_with("https://github.com/ggml-org/llama.cpp"));
             assert!(a.sha256.len() == 64);
             assert!(a.size > 1_000_000);
         }
