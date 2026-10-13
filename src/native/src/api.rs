@@ -19,6 +19,7 @@ use tower_http::{
 };
 
 use crate::{
+    ai::local::LocalLlm,
     auth::{self, model::AuthError, store::Store},
     chat::store::ChatStore,
     cloud::Cloud,
@@ -51,6 +52,9 @@ pub struct AppState {
     pub voice: VoiceService,
     pub tts: TtsManager,
     pub pi: PiSupervisor,
+    /// App-managed llama.cpp runtime (curated GGUFs + supervised server).
+    /// Machine-global: one server serves every local user at a time.
+    pub llm: Arc<LocalLlm>,
     /// Supabase (accounts + history mirror). Disabled without config, in
     /// which case every method is a no-op and the app stays local-only.
     pub cloud: Arc<Cloud>,
@@ -159,6 +163,8 @@ pub fn router(state: AppState) -> Router {
             get(crate::chat::routes::key_status).post(crate::chat::routes::save_key),
         )
         .route("/v1/ai/keys/{id}", delete(crate::chat::routes::delete_key))
+        .route("/v1/ai/local-models/{id}/use", post(crate::ai::local::use_model))
+        .route("/v1/ai/local-models/{id}", delete(crate::ai::local::delete_model))
         .route(
             "/v1/prefs/risky-input",
             get(crate::chat::routes::get_risky_input).put(crate::chat::routes::put_risky_input),
@@ -177,6 +183,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/refresh", post(auth::routes::refresh))
         .route("/v1/auth/logout", post(auth::routes::logout))
         .route("/v1/ai/providers", get(crate::ai::routes::providers))
+        .route("/v1/ai/local-models", get(crate::ai::local::list_models))
+        .route("/v1/ai/local-models/{id}/download", post(crate::ai::local::download_model))
+        .route("/v1/ai/local-models/{id}/cancel", post(crate::ai::local::cancel_download))
         .route(
             "/v1/ai/providers/{id}/start",
             post(crate::ai::routes::start_provider),

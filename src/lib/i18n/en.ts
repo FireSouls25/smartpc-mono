@@ -178,6 +178,23 @@ export const en: Record<I18nKey, string> = {
   "settings.voice": "Voice",
   "settings.account": "Account",
   "settings.history": "History",
+  "settings.models": "Local models",
+  "chat.getLocalModel": "Download a local model",
+  "localmodels.note":
+    "Models served by our own llama-server: no Ollama, no keys. First use downloads them (~2.5 GB each, resumable and verified).",
+  "localmodels.external":
+    "LLAMACPP_URL points at your own server: downloads only here, managed start/use is disabled.",
+  "localmodels.ready": "downloaded",
+  "localmodels.serving": "serving",
+  "localmodels.active": "active",
+  "localmodels.notDownloaded": "not downloaded",
+  "localmodels.download": "Download",
+  "localmodels.cancel": "Cancel",
+  "localmodels.delete": "Delete",
+  "localmodels.deleteHint":
+    "Removes the downloaded file (can be re-downloaded).",
+  "localmodels.use": "Use",
+  "localmodels.starting": "Starting…",
   "settings.historyNote":
     "Your saved conversations. Opening one shows it in the chat without changing your model; deleting removes it forever.",
   "settings.providerNote": "Only detected providers can be selected.",

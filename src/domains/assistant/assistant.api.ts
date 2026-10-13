@@ -12,7 +12,8 @@ export interface ProviderInfo {
    * those are refused — authenticate with `pi auth` instead. */
   key_paste: boolean;
   context_window: number | null;
-  /** The sidecar knows how to launch this server (today: ollama only). */
+  /** The sidecar knows how to launch this server (ollama via PATH,
+   * llama.cpp app-managed). */
   startable: boolean;
   /** Binary resolves on PATH. True when answering; null when N/A. */
   installed: boolean | null;
@@ -30,6 +31,17 @@ export interface SaveKeyResponse {
   /** False when pi lists the provider but offers no live check (only
    * opencode verifies today) — the key is stored, first use proves it. */
   verified: boolean;
+}
+
+export interface LocalModelInfo {
+  id: string;
+  label: string;
+  params: string;
+  size: number;
+  state: "not_downloaded" | "downloading" | "ready";
+  downloaded_bytes: number;
+  serving: boolean;
+  last_error: string | null;
 }
 
 export interface SessionSummary {
@@ -82,6 +94,47 @@ export interface RunResponse {
 
 export const aiApi = {
   providers: () => api<{ providers: ProviderInfo[] }>("/v1/ai/providers"),
+
+  /** App-managed GGUFs: catalog + download/server state (sidecar-gated). */
+  localModels: () =>
+    api<{
+      models: LocalModelInfo[];
+      binary_present: boolean;
+      external_server: boolean;
+    }>("/v1/ai/local-models"),
+
+  downloadLocalModel: (id: string) =>
+    api<{ ok: boolean; state: string }>(
+      `/v1/ai/local-models/${encodeURIComponent(id)}/download`,
+      { method: "POST", timeoutMs: 15000 },
+    ),
+
+  cancelLocalModelDownload: (id: string) =>
+    api<{ ok: boolean }>(
+      `/v1/ai/local-models/${encodeURIComponent(id)}/cancel`,
+      { method: "POST", timeoutMs: 15000 },
+    ),
+
+  deleteLocalModel: (id: string) =>
+    api<{ ok: boolean; removed: boolean }>(
+      `/v1/ai/local-models/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+        timeoutMs: 30000,
+        ...withAuth(auth.token ?? undefined),
+      },
+    ),
+
+  /** Start + persist selection (server boot of a few GB takes a while). */
+  useLocalModel: (id: string) =>
+    api<{ ok: boolean; provider: string; model: string }>(
+      `/v1/ai/local-models/${encodeURIComponent(id)}/use`,
+      {
+        method: "POST",
+        timeoutMs: 180000,
+        ...withAuth(auth.token ?? undefined),
+      },
+    ),
 
   /** Launch a startable local server and wait until it answers. */
   startProvider: (id: string) =>

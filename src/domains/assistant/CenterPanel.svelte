@@ -6,6 +6,7 @@
   import { formatReply } from "./reply.format";
   import { providerStore as providers } from "./providers.store.svelte";
   import { sessionStore as sessions } from "./sessions.store.svelte";
+  import { navigate } from "../../app/router.svelte";
   import { voice } from "../voice/voice.store.svelte";
   import { displayHotkey } from "../voice/voice.store.svelte";
   import { t } from "../../lib/i18n.svelte";
@@ -470,6 +471,13 @@
       <p class="chip" style="border-color: var(--accent); color: var(--fg);">
         {t("chat.noSelection")}
       </p>
+      <button
+        class="chip"
+        style="border-color: var(--accent); color: var(--fg);"
+        onclick={() => navigate("settings/5")}
+      >
+        {t("chat.getLocalModel")}
+      </button>
     {/if}
     <div class="flex flex-wrap items-center gap-2">
       <SelectMenu

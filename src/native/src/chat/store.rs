@@ -642,6 +642,16 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Drop the persisted pick (e.g. its managed model was uninstalled):
+    /// the account returns to fresh (unselected) behavior.
+    pub fn clear_selection(&self, user_id: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM ai_selection WHERE user_id = ?1",
+            params![user_id],
+        )?;
+        Ok(())
+    }
+
     // ---------------------------------------------------------------------
     // Prefs (T4 D5). Plain preference strings, never secrets. The risky
     // toggle is advisory storage only: `Policy::for_user` ORs it with the

@@ -9,6 +9,7 @@
 //   2. cargo build --release      → src/native/target/release/smartpc-native
 //   3. copy it to                → release/staging/bin/      (→ resources/bin/)
 //   3b. copy pi-bridge (+prune)  → release/staging/pi-bridge (→ resources/)
+//   3c. fetch llama-server       → release/staging/bin/      (→ resources/bin/)
 //   4. electron-builder           → release/out/
 //
 //   node scripts/build-release.mjs                 # installers for this OS
@@ -163,6 +164,11 @@ function stagePiBridge() {
   );
 }
 stagePiBridge();
+
+// 3c. Stage llama-server (app-managed local inference) ----------------------
+// Pinned per-OS build, hash-verified. The sidecar self-resolves it under
+// resources/bin (packaged) and falls back to an on-demand download in dev.
+run("node", ["scripts/fetch-llama-server.mjs"]);
 
 // 4. Package ------------------------------------------------------------------
 const builderArgs = ["electron-builder", "--publish", "never"];

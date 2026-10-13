@@ -74,14 +74,49 @@ pub async fn providers(State(s): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({ "providers": list }))).into_response()
 }
 
-/// Launch a startable local server (`ollama serve`) and wait until it
-/// answers. Synchronous with a bounded wait so the caller gets a definitive
-/// error (`not_installed`, `start_failed`); slow boots surface as
+/// Launch a startable local server and wait until it answers. Synchronous
+/// with a bounded wait so the caller gets a definitive error
+/// (`not_installed`, `start_failed`); slow boots surface as
 /// `start_timeout` and the UI poll picks the server up when ready.
+///
+/// `llama.cpp` is app-managed (see `super::local`): it starts the first
+/// downloaded curated model (catalog order) instead of a static command.
 pub async fn start_provider(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if id.trim() == "llama.cpp" {
+        if s.llm.serving().is_some() {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "already_running": true })),
+            )
+                .into_response();
+        }
+        return match s.llm.start_first_ready().await {
+            Ok((_, model)) => (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({ "ok": true, "already_running": false, "model": model }),
+                ),
+            )
+                .into_response(),
+            Err(e) if e.contains("no local model") => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": { "code": "no_model", "message": "no local model downloaded — download one first" }
+                })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": { "code": "start_failed", "message": e }
+                })),
+            )
+                .into_response(),
+        };
+    }
     match supervise::ensure_running(&id).await {
         Ok(EnsureOutcome::AlreadyRunning) => (
             StatusCode::OK,

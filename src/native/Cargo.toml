@@ -27,6 +27,11 @@ chrono = { version = "0.4", features = ["serde"] }
 email_address = "0.2"
 # Local-model providers: OpenAI-compatible chat (Ollama, llama.cpp server).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+# Managed llama.cpp runtime: server archive extraction (zip for Windows,
+# tar.gz for unix) for the on-demand binary download.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
 # Detached process groups for the embedded pi runtime (Unix setsid).
 libc = "0.2"
 # Local voice in (mic → VAD → whisper): needs cmake + a C++ compiler at

@@ -162,6 +162,96 @@ describe("sidecar contract", () => {
     expect(body.error.code).toBe("validation");
   });
 
+  test("local models list with stable shapes; unknown ids fail closed", async () => {
+    const list = await fetch(`${BASE}/v1/ai/local-models`, { headers: gate });
+    expect(list.ok).toBe(true);
+    const body = (await list.json()) as {
+      models: {
+        id: string;
+        label: string;
+        params: string;
+        size: number;
+        state: string;
+        downloaded_bytes: number;
+        serving: boolean;
+        last_error: string | null;
+      }[];
+      binary_present: boolean;
+      external_server: boolean;
+    };
+    expect(body.models.length).toBeGreaterThan(0);
+    for (const m of body.models) {
+      expect(typeof m.id).toBe("string");
+      expect(typeof m.label).toBe("string");
+      expect(typeof m.size).toBe("number");
+      expect(["not_downloaded", "downloading", "ready"]).toContain(m.state);
+      expect(typeof m.downloaded_bytes).toBe("number");
+      expect(typeof m.serving).toBe("boolean");
+    }
+    expect(typeof body.binary_present).toBe("boolean");
+    expect(typeof body.external_server).toBe("boolean");
+    // Unknown ids never start work.
+    const dl = await fetch(`${BASE}/v1/ai/local-models/nope/download`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(dl.status).toBe(400);
+    expect(((await dl.json()) as { error: { code: string } }).error.code).toBe(
+      "unknown_model",
+    );
+    // Nothing downloaded here: starting fails closed, never implicitly.
+    const start = await fetch(`${BASE}/v1/ai/providers/llama.cpp/start`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(start.status).toBe(404);
+    expect(
+      ((await start.json()) as { error: { code: string } }).error.code,
+    ).toBe("no_model");
+  });
+
+  test("managed use without download fails closed", async () => {
+    const tag = `l${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    const list = (await (
+      await fetch(`${BASE}/v1/ai/local-models`, { headers: gate })
+    ).json()) as { models: { id: string }[] };
+    const use = await fetch(
+      `${BASE}/v1/ai/local-models/${list.models[0].id}/use`,
+      { method: "POST", headers: authed },
+    );
+    // Fresh temp db: nothing downloaded → explicit, no implicit pull.
+    expect(use.status).toBe(400);
+    expect(((await use.json()) as { error: { code: string } }).error.code).toBe(
+      "not_downloaded",
+    );
+    const del = await fetch(`${BASE}/v1/ai/local-models/nope`, {
+      method: "DELETE",
+      headers: authed,
+    });
+    expect(del.status).toBe(400);
+  });
+
   test("user routes require a bearer token", async () => {
     const res = await fetch(`${BASE}/v1/chat/sessions`, { headers: gate });
     expect(res.status).toBe(401);
@@ -397,15 +487,26 @@ describe("sidecar contract", () => {
   });
 
   test("unstartable providers fail closed, deterministically", async () => {
-    for (const id of ["llama.cpp", "nope"]) {
-      const res = await fetch(
-        `${BASE}/v1/ai/providers/${encodeURIComponent(id)}/start`,
-        { method: "POST", headers: gate },
-      );
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { error: { code: string } };
-      expect(body.error.code).toBe("not_startable");
-    }
+    // Unknown ids are never startable.
+    const res = await fetch(`${BASE}/v1/ai/providers/nope/start`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("not_startable");
+  });
+
+  test("managed llama.cpp start fails closed without downloads", async () => {
+    // Fresh temp db: no curated model on disk → explicit no_model, never
+    // an implicit multi-GB pull.
+    const res = await fetch(`${BASE}/v1/ai/providers/llama.cpp/start`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("no_model");
   });
 
   test("voice status has a stable shape (no mic needed)", async () => {

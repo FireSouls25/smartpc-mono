@@ -452,6 +452,7 @@ mod tests {
             cloud: Arc::new(crate::cloud::Cloud::new(None)),
             voice: crate::stt::VoiceService::new(std::env::temp_dir().join("smartpc-test-models")),
             tts: crate::tts::TtsManager::new(std::env::temp_dir()),
+            llm: Arc::new(crate::ai::local::LocalLlm::new(std::env::temp_dir())),
             pi: crate::pi::PiSupervisor::new(crate::pi::supervisor::PiConfig {
                 bridge_path: std::path::PathBuf::from("pi-bridge/smartpc.ts"),
                 data_dir: std::env::temp_dir(),

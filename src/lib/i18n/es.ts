@@ -183,6 +183,23 @@ export const es = {
   "settings.voice": "Voz",
   "settings.account": "Cuenta",
   "settings.history": "Historial",
+  "settings.models": "Modelos locales",
+  "chat.getLocalModel": "Descargar un modelo local",
+  "localmodels.note":
+    "Modelos servidos por nuestro propio llama-server: sin Ollama ni claves. La primera vez se descargan (~2,5 GB cada uno, reanudable y verificado).",
+  "localmodels.external":
+    "LLAMACPP_URL apunta a tu propio servidor: aquí solo puedes descargar archivos, no iniciar ni usar modelos gestionados.",
+  "localmodels.ready": "descargado",
+  "localmodels.serving": "en servicio",
+  "localmodels.active": "activo",
+  "localmodels.notDownloaded": "no descargado",
+  "localmodels.download": "Descargar",
+  "localmodels.cancel": "Cancelar",
+  "localmodels.delete": "Eliminar",
+  "localmodels.deleteHint":
+    "Borra el archivo descargado (se puede volver a descargar).",
+  "localmodels.use": "Usar",
+  "localmodels.starting": "Iniciando…",
   "settings.historyNote":
     "Tus conversaciones guardadas. Abrir una la muestra en el chat sin cambiar tu modelo; eliminarla la borra para siempre.",
   "settings.providerNote": "Solo se pueden elegir proveedores detectados.",

@@ -375,6 +375,13 @@ pub async fn chat(
     };
     // Missing local model: download it once instead of failing every turn,
     // typed or voice-driven.
+    // Managed llama.cpp: boot/switch our server when the turn names a
+    // downloaded curated model (reboot + model-switch cases). Foreign
+    // servers and unknown models fall through to the normal error path.
+    if let Some(r) = crate::ai::local::ensure_serving_for(&s, &prov_name, &model_name).await
+    {
+        return r;
+    }
     if agent.name() == "ollama" {
         if let Err(e) = crate::ai::ollama::ensure_model_present(&model_name).await {
             return pull_error(&e);
@@ -913,6 +920,11 @@ pub async fn run(
         Err(r) => return r,
     };
     // Same first-use download as `chat` (agentic turns need the model too).
+    // Managed llama.cpp: same boot/switch guard as `chat`.
+    if let Some(r) = crate::ai::local::ensure_serving_for(&s, &prov_name, &model).await
+    {
+        return r;
+    }
     if agent.name() == "ollama" {
         if let Err(e) = crate::ai::ollama::ensure_model_present(&model).await {
             return pull_error(&e);

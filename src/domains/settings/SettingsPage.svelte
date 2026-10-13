@@ -14,6 +14,7 @@
   import { providerStore as providers } from "../assistant/providers.store.svelte";
   import ProviderStart from "../assistant/ProviderStart.svelte";
   import SessionsPane from "../assistant/SessionsPane.svelte";
+  import LocalModels from "./LocalModels.svelte";
   import { voice, DEFAULT_WAKE_WORD } from "../voice/voice.store.svelte";
   import {
     DEFAULT_HOTKEY,
@@ -39,7 +40,14 @@
 
   // Gestures were cut here on purpose (P2 #13): the toggle switched state
   // with no detection pipeline behind it. It returns with the pipeline.
-  const sections = ["general", "ai", "voice", "account", "history"] as const;
+  const sections = [
+    "general",
+    "ai",
+    "voice",
+    "account",
+    "history",
+    "models",
+  ] as const;
   const clamp = (n: number): number =>
     Math.min(sections.length - 1, Math.max(0, n));
   // Local state synced FROM the route (Back button, deep links); writes go
@@ -874,6 +882,9 @@
           <p class="muted text-sm">{t("settings.historyNote")}</p>
           <SessionsPane />
         </div>
+      {:else if section === 5}
+        <!-- App-managed GGUFs on our own llama-server (no Ollama needed). -->
+        <LocalModels />
       {:else}
         <div class="flex flex-col gap-4">
           <div class="group-card">

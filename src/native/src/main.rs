@@ -194,6 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         voice: crate::stt::VoiceService::new(models_dir),
         tts: crate::tts::TtsManager::new(data_dir.clone()),
         pi,
+        llm: Arc::new(crate::ai::local::LocalLlm::new(data_dir.clone())),
         cloud,
         jwt_secret: Arc::new(jwt_secret),
         access_ttl_secs: 15 * 60,
@@ -208,9 +209,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().flush()?;
     }
 
-    axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+    axum::serve(listener, api::router(state.clone()))
+        .with_graceful_shutdown(async move {
+            // Our managed llama-server is ours to reap: unlike `ollama
+            // serve` (a user-level server that intentionally outlives us)
+            // an orphaned managed server would squat RAM with no owner.
+            // Windows TerminateProcess skips this — the pidfile reap in
+            // `LocalLlm::new` covers that path on the next boot.
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term = signal(SignalKind::terminate())
+                    .expect("SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    _ = term.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+            state.llm.stop().await;
         })
         .await?;
     Ok(())

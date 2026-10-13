@@ -17,8 +17,8 @@ use std::time::Duration;
 use super::provider::Provider;
 
 /// How to launch a vendor's server. `None` = not startable by us
-/// (llama.cpp needs a model path + flags we cannot guess; keyed gateways
-/// need no local server at all).
+/// (keyed gateways need no local server at all; llama.cpp is supervised
+/// separately by `super::local`, which owns its model path + flags).
 pub struct StartSpec {
     pub bin: &'static str,
     pub args: &'static [&'static str],

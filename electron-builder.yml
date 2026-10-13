@@ -23,6 +23,9 @@ files:
 extraResources:
   - from: release/staging/bin
     to: bin
+    filter:
+      - "**/*"
+      - "!**/.llama-build"
   # Vendored pi runtime (CLI + bridge + TTS daemon). The sidecar resolves
   # it under resources/pi-bridge and spawns the CLI via the local node.
   # Staged pruned per platform by scripts/build-release.mjs (step 3b).

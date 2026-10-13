@@ -5,6 +5,7 @@
 //! [`provider::Provider::resolve`]. The rest of the backend only sees the
 //! trait + the [`provider::Provider`] enum.
 pub mod llamacpp;
+pub mod local;
 pub mod ollama;
 pub mod openai_compat;
 pub mod opencode;

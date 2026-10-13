@@ -185,6 +185,21 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
         tokio::join!(crate::ai::routes::probe("ollama"), crate::ai::routes::probe("llama.cpp"));
     out.push(ollama);
     out.push(llamacpp);
+    // llama.cpp is app-managed (see ai::local): startable through the
+    // models view / start endpoint, installed = server binary present.
+    // `available` stays the live probe (our server answering, or the
+    // user's own on the default port).
+    if let Some(obj) = out
+        .iter_mut()
+        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some("llama.cpp"))
+        .and_then(|v| v.as_object_mut())
+    {
+        obj.insert("startable".to_string(), serde_json::Value::Bool(true));
+        obj.insert(
+            "installed".to_string(),
+            serde_json::Value::Bool(state.llm.binary_present()),
+        );
+    }
     let mut live_ids: Vec<String> = Vec::new();
     for (id, group) in group_by_provider(&models) {
         if is_local_provider(&id) {
@@ -246,6 +261,21 @@ async fn fallback() -> Vec<Value> {
         crate::ai::routes::probe("opencode"),
     );
     let mut out = vec![ollama, llamacpp, opencode];
+    // Same managed override as the live catalog (stateless half: the
+    // packaged binary probe needs no AppState).
+    if let Some(obj) = out
+        .iter_mut()
+        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some("llama.cpp"))
+        .and_then(|v| v.as_object_mut())
+    {
+        obj.insert("startable".to_string(), serde_json::Value::Bool(true));
+        obj.insert(
+            "installed".to_string(),
+            serde_json::Value::Bool(
+                crate::ai::local::LocalLlm::packaged_server_binary().is_some(),
+            ),
+        );
+    }
     let live_ids = ["ollama", "llama.cpp", "opencode"]
         .iter()
         .map(|s| s.to_string())
