@@ -126,14 +126,16 @@ pub fn catalog_entry(id: &str) -> Option<&'static ModelEntry> {
     MODEL_CATALOG.iter().find(|e| e.id == id)
 }
 
+/// Set once when WE export LLAMACPP_URL for our managed server, so the
+/// external-server guard can tell our own export apart from the user's.
+static MANAGED_ENV_SET: AtomicBool = AtomicBool::new(false);
+
 fn managed_env_ours() -> bool {
-    static OURS: AtomicBool = AtomicBool::new(false);
-    OURS.load(Ordering::Relaxed)
+    MANAGED_ENV_SET.load(Ordering::Relaxed)
 }
 
 fn mark_managed_env() {
-    static OURS: AtomicBool = AtomicBool::new(false);
-    OURS.store(true, Ordering::Relaxed);
+    MANAGED_ENV_SET.store(true, Ordering::Relaxed);
 }
 
 /// A user preset means hands off (see module docs). True when `LLAMACPP_URL`
@@ -217,8 +219,16 @@ impl LocalLlm {
         if let Some(staged) = Self::packaged_server_binary() {
             return Some(staged);
         }
-        let local = self.bin_dir().join(Self::bin_name());
-        local.is_file().then_some(local)
+        // Top-level hit first (packaging layout); then a shallow walk for
+        // dev-downloaded trees, whose archives extract nested (build/bin/).
+        let top = self.bin_dir().join(Self::bin_name());
+        if top.is_file() {
+            return Some(top);
+        }
+        let mut found = Vec::new();
+        collect_named(&self.bin_dir(), Self::bin_name(), 4, &mut found);
+        found.sort_by_key(|p| p.components().count());
+        found.into_iter().next()
     }
 
     pub fn binary_present(&self) -> bool {
@@ -505,6 +515,12 @@ impl LocalLlm {
         let archive = self.bin_dir().join(asset.file);
         download_file(&asset.url(), &archive, asset.size, Some(asset.sha256)).await?;
         let bin = extract_server_binary(&archive, &self.bin_dir(), asset.exe_suffix)?;
+        // Collapse the archive tree: the binary + its sibling libs live
+        // at bin/ top level, so resolution is one lookup and the dir
+        // stays small (bench tools, extra impls and the archive go away).
+        self.consolidate_server_files(&bin)?;
+        let _ = std::fs::remove_file(&archive);
+        let bin = self.bin_dir().join(Self::bin_name());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -721,6 +737,8 @@ async fn server_answers(port: u16) -> bool {
 
 /// Plain file download with optional resume + size/sha256 verification.
 /// Used for the server archive (hash pinned) and GGUFs (via run_download).
+/// Idempotent: a complete file on disk verifies and returns without any
+/// request; a 416 to a Range request means "you already have it all".
 async fn download_file(
     url: &str,
     dest: &Path,
@@ -730,6 +748,19 @@ async fn download_file(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    if let Ok(meta) = std::fs::metadata(dest) {
+        if expected_size > 0 && meta.len() == expected_size {
+            if let Some(expected) = sha256 {
+                let digest = file_sha256(dest)?;
+                if digest == expected {
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(dest);
+            } else {
+                return Ok(());
+            }
+        }
+    }
     let start_at = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
     let client = reqwest::Client::new();
     let mut req = client.get(url);
@@ -738,6 +769,12 @@ async fn download_file(
     }
     let mut resp = req.send().await.map_err(|e| e.to_string())?;
     let appending = start_at > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // We asked past EOF: the whole file is already here. Verify it
+        // instead of failing (stale .part from a finished run, racing
+        // completions, CDN quirks).
+        return verify_file(dest, expected_size, sha256);
+    }
     if !resp.status().is_success() {
         return Err(format!("download failed: HTTP {}", resp.status()));
     }
@@ -785,12 +822,33 @@ async fn download_file(
             }
         }
     }
+    verify_file(dest, expected_size, sha256)
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| e.to_string())?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Size (+ optional hash) check shared by the fast paths: a mismatch
+/// deletes the file so the next attempt starts clean.
+fn verify_file(dest: &Path, expected_size: u64, sha256: Option<&str>) -> Result<(), String> {
     let len = std::fs::metadata(dest)
         .map(|m| m.len())
         .map_err(|e| e.to_string())?;
     if expected_size > 0 && len != expected_size {
         let _ = std::fs::remove_file(dest);
         return Err(format!("size mismatch (got {len}, want {expected_size})"));
+    }
+    if let Some(expected) = sha256 {
+        let digest = file_sha256(dest)?;
+        if digest != expected {
+            let _ = std::fs::remove_file(dest);
+            return Err("checksum mismatch — deleted, try again".to_string());
+        }
     }
     Ok(())
 }
@@ -842,6 +900,46 @@ fn extract_server_binary(
     found.into_iter().next().ok_or_else(|| {
         format!("llama-server binary not found in {}", archive.display())
     })
+}
+
+impl LocalLlm {
+    /// Move the extracted server binary and its sibling shared libs to
+    /// the bin dir top level, then drop the rest of the archive tree
+    /// (bench/CLI tools we never spawn). Keeps resolution to a single
+    /// lookup and the dir small across updates.
+    fn consolidate_server_files(&self, bin: &Path) -> Result<(), String> {
+        let top = self.bin_dir().join(Self::bin_name());
+        let src_dir = bin.parent().ok_or("server binary has no parent")?;
+        if bin != top {
+            if top.exists() {
+                let _ = std::fs::remove_file(&top);
+            }
+            std::fs::rename(bin, &top).map_err(|e| e.to_string())?;
+        }
+        if src_dir != self.bin_dir() {
+            for entry in std::fs::read_dir(src_dir).map_err(|e| e.to_string())?.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if name.ends_with(".so")
+                    || name.contains(".so.")
+                    || name.ends_with(".dylib")
+                    || name.ends_with(".dll")
+                {
+                    let dest = self.bin_dir().join(name);
+                    if dest != p {
+                        let _ = std::fs::remove_file(&dest);
+                        std::fs::rename(&p, &dest).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            // Whatever is left (other tools, impl libs, docs) goes away.
+            let _ = std::fs::remove_dir_all(src_dir);
+        }
+        Ok(())
+    }
 }
 
 fn collect_named(dir: &Path, want: &str, depth: u8, out: &mut Vec<PathBuf>) {

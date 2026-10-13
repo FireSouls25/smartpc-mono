@@ -125,7 +125,7 @@ pub async fn bootstrap(State(s): State<AppState>) -> impl IntoResponse {
         // Turns only reach pi after the guard boots our server (and every
         // boot drops children, so the respawn re-registers fresh): the
         // down-state list stays empty rather than advertising a guess.
-        Some((_, alias)) => vec![serde_json::json!({ "id": alias })],
+        Some((_, alias)) => vec![smartpc_model_object(&alias)],
         None => Vec::new(),
     };
     let smartpc_base = match s.llm.serving() {
@@ -231,9 +231,38 @@ pub async fn tool(
         .into_response()
 }
 
+/// Full model object for our managed entry (mirrors the ollama entry
+/// shape: pi reads name/input/cost/contextWindow off it while building
+/// requests — a bare `{id}` crashes request building with an inscrutable
+/// `reading 'includes'` instead of answering).
+fn smartpc_model_object(alias: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": alias,
+        "name": alias,
+        "reasoning": false,
+        "input": ["text"],
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "contextWindow": 8192,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smartpc_model_object_carries_the_full_shape() {
+        // Regression: bare `{id}` entries settle turns with no text and
+        // no server contact (pi crashes reading model fields). Every
+        // field the ollama entry has must be present here too.
+        let m = smartpc_model_object("qwen3-4b");
+        assert_eq!(m["id"], "qwen3-4b");
+        assert_eq!(m["name"], "qwen3-4b");
+        assert_eq!(m["reasoning"], false);
+        assert!(m["input"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(m["cost"].is_object());
+        assert!(m["contextWindow"].as_u64().is_some());
+    }
 
     /// Copy-on-rotate: a fresh pi file inherits the old file's session
     /// counters (and never overwrites a live entry).

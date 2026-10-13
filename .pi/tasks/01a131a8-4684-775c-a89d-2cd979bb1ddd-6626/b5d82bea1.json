@@ -1,0 +1,28 @@
+{
+  "id": "b5d82bea1",
+  "name": "LLM repro with real model",
+  "command": "bash /home/grim/llm-repro.sh",
+  "status": "completed",
+  "outputPath": ".pi/tasks/01a131a8-4684-775c-a89d-2cd979bb1ddd-6626/b5d82bea1.output",
+  "cwd": "/home/grim/Documents/projects/smart-pc/frontend",
+  "startTime": 1791853723381,
+  "endTime": 1791853819400,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 63858,
+  "bytesWritten": 1043,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 2400,
+  "shellPolicy": {
+    "policy": "inherit",
+    "executable": "/usr/bin/nu",
+    "argvPrefix": [
+      "-c"
+    ],
+    "dialect": "user-non-posix"
+  }
+}

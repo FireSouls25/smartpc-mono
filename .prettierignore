@@ -1,6 +1,7 @@
 dist/
 release/
 test-results/
+.pi/
 src/native/target/
 lancedb/
 .env

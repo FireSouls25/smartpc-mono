@@ -1,0 +1,28 @@
+=== building sidecar ===
+   Compiling smartpc-native v0.1.0 (/home/grim/Documents/projects/smart-pc/frontend/src/native)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.63s
+=== booting sidecar ===
+{"protocol":5,"status":"ok"}=== register ===
+{"user":{"created_at":"2026-10-13T01:08:57Z","email":"repro@test.co","id":"c62f68aa706e7f9dfd6dccc10e05d657"}}
+=== login ===
+=== download phi-4-mini ===
+{"ok":true,"state":"started"}
+qwen3-4b not_downloaded 0 None
+phi-4-mini downloading 468477271 None
+qwen3-4b not_downloaded 0 None
+phi-4-mini downloading 1060070743 None
+qwen3-4b not_downloaded 0 None
+phi-4-mini downloading 1566238039 None
+qwen3-4b not_downloaded 0 None
+phi-4-mini downloading 2097145175 None
+qwen3-4b not_downloaded 0 None
+phi-4-mini ready 2491874688 None
+=== use ===
+{"model":"phi-4-mini","ok":true,"provider":"smartpc"}
+=== chat hola ===
+
+=== sidecar log tail ===
+cloud: not configured (local accounts only)
+READY port=18081
+llm: serving phi-4-mini on 127.0.0.1:39181
+pi: spawned (node) for user c62f68aa…

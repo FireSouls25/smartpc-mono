@@ -9,6 +9,7 @@ export default [
     ignores: [
       "dist/**",
       "release/**",
+      ".pi/**",
       "test-results/**",
       "src/native/target/**",
       "lancedb/**",

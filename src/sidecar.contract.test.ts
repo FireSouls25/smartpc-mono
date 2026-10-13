@@ -1011,10 +1011,13 @@ describe("sidecar contract", () => {
     expect(has(/daniela/i)).toBe(1);
     expect(has(/kitten/i)).toBe(4);
     expect(has(/davefx/i)).toBe(1);
-    // English: 2 masculine + 2 feminine (Kitten sids, one 25 MB model).
+    expect(has(/lessac/i)).toBe(1);
+    expect(has(/alan/i)).toBe(1);
+    // English: 2 masculine + 2 feminine (Kitten sids, one 25 MB model)
+    // + Alan M + Lessac F.
     const en = body.models.filter((m) => m.lang === "en");
-    expect(en.filter((m) => m.gender === "male").length).toBe(2);
-    expect(en.filter((m) => m.gender === "female").length).toBe(2);
+    expect(en.filter((m) => m.gender === "male").length).toBe(3);
+    expect(en.filter((m) => m.gender === "female").length).toBe(3);
     // Spanish: Davefx M + Sharvard M/F + Daniela F = 2M + 2F (kokoro gone).
     const es = body.models.filter((m) => m.lang === "es");
     expect(es.filter((m) => m.gender === "male").length).toBe(2);

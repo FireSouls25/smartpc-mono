@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import MatrixOrb from "../../components/ui/matrix-orb.svelte";
   import SelectMenu from "../../shared/SelectMenu.svelte";
   import ProviderStart from "./ProviderStart.svelte";
@@ -9,6 +10,8 @@
   import { navigate } from "../../app/router.svelte";
   import { voice } from "../voice/voice.store.svelte";
   import { displayHotkey } from "../voice/voice.store.svelte";
+  import { voiceApi, type TtsModelsResponse } from "../voice/voice.api";
+  import { getLang } from "../../lib/i18n.svelte";
   import { t } from "../../lib/i18n.svelte";
 
   const orbLabels = () => ({
@@ -103,6 +106,22 @@
         : t("voice.shortManual");
 
   const engineOn = () => providers.activeAvailable();
+
+  // TTS voice catalog for the quick picker below the orb (same source
+  // as Settings → Voice; picking only sets the pref, the daemon
+  // downloads on first speak like everywhere else).
+  let ttsModels = $state<TtsModelsResponse | null>(null);
+  onMount(() => {
+    void voiceApi
+      .ttsModels()
+      .then((m) => (ttsModels = m))
+      .catch(() => {});
+  });
+  const ttsVoiceOptions = () =>
+    [...(ttsModels?.models ?? [])]
+      .filter((m) => m.lang === getLang())
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .map((m) => ({ value: m.id, label: m.label }));
 </script>
 
 <div class="card-xl flex h-full min-h-0 flex-1 flex-col">
@@ -218,6 +237,17 @@
           </button>
         {/if}
       </div>
+      {#if ttsVoiceOptions().length}
+        <div class="flex items-center gap-1.5">
+          <SelectMenu
+            label={t("voice.ttsVoice")}
+            value={voice.ttsVoice}
+            options={ttsVoiceOptions()}
+            align="down"
+            onChange={(v) => voice.setTtsVoice(v)}
+          />
+        </div>
+      {/if}
     </div>
   </div>
 
@@ -236,63 +266,31 @@
           </div>
         {:else}
           <div class="msg-in flex justify-start">
-            <div class="assistant-avatar mt-1 mr-2 shrink-0" aria-hidden="true">
-              <span class="dot" style="background: var(--accent);"></span>
-            </div>
-            <div class="flex w-full flex-col gap-1">
-              <div class="reply-text">
-                <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
-                {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
+            <div class="mx-auto flex w-full max-w-[72ch]">
+              <div
+                class="assistant-avatar mt-1 mr-2 shrink-0"
+                aria-hidden="true"
+              >
+                <span class="dot" style="background: var(--accent);"></span>
               </div>
-              {#if m.text}
-                <div class="flex items-center gap-1 pt-1">
-                  <button
-                    type="button"
-                    class="icon-btn"
-                    style="padding: 0.25rem;"
-                    title={t("chat.replay")}
-                    aria-label={t("chat.replay")}
-                    onclick={() => void voice.speakText(m.text ?? "")}
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      class="h-4 w-4"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.8"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      aria-hidden="true"
+              <div
+                class="flex w-full min-w-0 flex-col justify-center gap-1"
+                style="min-height: 1.625rem;"
+              >
+                <div class="reply-text">
+                  <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
+                  {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
+                </div>
+                {#if m.text}
+                  <div class="flex items-center gap-1 pt-1">
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      style="padding: 0.25rem;"
+                      title={t("chat.replay")}
+                      aria-label={t("chat.replay")}
+                      onclick={() => void voice.speakText(m.text ?? "")}
                     >
-                      <path d="M11 5 6 9H3v6h3l5 4z" />
-                      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
-                      <path d="M18.5 5.5a9 9 0 0 1 0 13" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-btn"
-                    style="padding: 0.25rem;"
-                    title={copiedKey === (m.id ?? `local-${i}`)
-                      ? t("chat.copied")
-                      : t("chat.copy")}
-                    aria-label={t("chat.copy")}
-                    onclick={() => void copyText(m.id ?? `local-${i}`, m.text)}
-                  >
-                    {#if copiedKey === (m.id ?? `local-${i}`)}
-                      <svg
-                        viewBox="0 0 24 24"
-                        class="h-4 w-4"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <path d="M20 6 9 17l-5-5" />
-                      </svg>
-                    {:else}
                       <svg
                         viewBox="0 0 24 24"
                         class="h-4 w-4"
@@ -303,32 +301,73 @@
                         stroke-linejoin="round"
                         aria-hidden="true"
                       >
-                        <rect x="9" y="9" width="12" height="12" rx="0" />
-                        <path d="M5 15H4V3h12v1" />
+                        <path d="M11 5 6 9H3v6h3l5 4z" />
+                        <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+                        <path d="M18.5 5.5a9 9 0 0 1 0 13" />
                       </svg>
-                    {/if}
-                  </button>
-                </div>
-              {/if}
-              {#if m.steps?.length}
-                <div class="flex flex-wrap gap-1 pl-1">
-                  {#each m.steps as st, j (j)}
-                    <span
-                      class="chip"
-                      style="font-size: 10px; padding: 2px 8px;"
-                      title={st.ok ? "tool ok" : "tool failed"}
+                    </button>
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      style="padding: 0.25rem;"
+                      title={copiedKey === (m.id ?? `local-${i}`)
+                        ? t("chat.copied")
+                        : t("chat.copy")}
+                      aria-label={t("chat.copy")}
+                      onclick={() =>
+                        void copyText(m.id ?? `local-${i}`, m.text)}
                     >
+                      {#if copiedKey === (m.id ?? `local-${i}`)}
+                        <svg
+                          viewBox="0 0 24 24"
+                          class="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M20 6 9 17l-5-5" />
+                        </svg>
+                      {:else}
+                        <svg
+                          viewBox="0 0 24 24"
+                          class="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.8"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          aria-hidden="true"
+                        >
+                          <rect x="9" y="9" width="12" height="12" rx="0" />
+                          <path d="M5 15H4V3h12v1" />
+                        </svg>
+                      {/if}
+                    </button>
+                  </div>
+                {/if}
+                {#if m.steps?.length}
+                  <div class="flex flex-wrap gap-1 pl-1">
+                    {#each m.steps as st, j (j)}
                       <span
-                        class="dot"
-                        style="background: {st.ok
-                          ? 'var(--success)'
-                          : 'var(--danger)'};"
-                      ></span>
-                      {st.tool}
-                    </span>
-                  {/each}
-                </div>
-              {/if}
+                        class="chip"
+                        style="font-size: 10px; padding: 2px 8px;"
+                        title={st.ok ? "tool ok" : "tool failed"}
+                      >
+                        <span
+                          class="dot"
+                          style="background: {st.ok
+                            ? 'var(--success)'
+                            : 'var(--danger)'};"
+                        ></span>
+                        {st.tool}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             </div>
           </div>
         {/if}

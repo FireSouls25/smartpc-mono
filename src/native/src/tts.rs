@@ -531,8 +531,10 @@ pub struct TtsVoice {
 // exactly those two languages. es = Davefx M (default, existing cache
 // untouched) + Sharvard M/F (one 76 MB model, sids 0/1) + Daniela F
 // (es-AR accent, 114 MB, single speaker); en = Kitten M1/M2/F1/F2
-// (25 MB shared model, sids 0/2/1/3, existing cache). `kokoro` is gone
-// for good; old stored prefs fall back via the invalid_voice path.
+// (25 MB shared model, sids 0/2/1/3, existing cache) + Lessac F
+// (neutral feminine, GLaDOS-adjacent) + Alan M (British masculine,
+// JARVIS-adjacent). `kokoro` is gone for good; old stored prefs fall
+// back via the invalid_voice path.
 pub const TTS_CATALOG: &[TtsVoice] = &[
     TtsVoice {
         id: "piper-es_ES-davefx-medium-int8",
@@ -632,6 +634,30 @@ pub const TTS_CATALOG: &[TtsVoice] = &[
         files_onnx: None,
         files_json: None,
         kitten: true,
+    },
+    TtsVoice {
+        id: "upstream-piper-en-lessac",
+        lang: "en",
+        label: "English (Lessac)",
+        gender: "female",
+        size_mb: 60,
+        quality: "medium",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+        files_onnx: Some("en/en_US/lessac/medium/en_US-lessac-medium.onnx"),
+        files_json: Some("en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"),
+        kitten: false,
+    },
+    TtsVoice {
+        id: "upstream-piper-en-alan",
+        lang: "en",
+        label: "English (Alan)",
+        gender: "male",
+        size_mb: 60,
+        quality: "medium",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/alan/medium/en_GB-alan-medium.onnx",
+        files_onnx: Some("en/en_GB/alan/medium/en_GB-alan-medium.onnx"),
+        files_json: Some("en/en_GB/alan/medium/en_GB-alan-medium.onnx.json"),
+        kitten: false,
     },
 ];
 
@@ -1099,10 +1125,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_eight_a2_entries_with_upstream_urls() {
+    fn catalog_a2_entries_with_upstream_urls() {
         // es 2M+2F (davefx M default, sharvard M/F, daniela F) +
-        // en 2M+2F (kitten sids) = the A2 voice table.
-        assert_eq!(TTS_CATALOG.len(), 8);
+        // en 4M+3F (kitten sids, lessac F, alan M) = the A2 voice table.
+        assert_eq!(TTS_CATALOG.len(), 10);
         for v in TTS_CATALOG {
             let base = v.id.split('#').next().unwrap_or(v.id);
             assert!(
@@ -1133,8 +1159,8 @@ mod tests {
         };
         assert_eq!(count("es", "male"), 2);
         assert_eq!(count("es", "female"), 2);
-        assert_eq!(count("en", "male"), 2);
-        assert_eq!(count("en", "female"), 2);
+        assert_eq!(count("en", "male"), 3);
+        assert_eq!(count("en", "female"), 3);
     }
 
     #[test]
