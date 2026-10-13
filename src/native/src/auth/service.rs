@@ -375,6 +375,15 @@ pub async fn logout(refresh_token: &str, state: &AppState) -> Result<LogoutOutco
         if !cloud_flushed {
             eprintln!("cloud: logout flush timed out, local rows kept");
         }
+        // Mirror anything the queue never saw (agent memory, renderer
+        // prefs): best-effort full push with the still-valid token, so a
+        // fresh login elsewhere adopts them. Failures stay local; the next
+        // login repairs via push_all the same way.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            state.cloud.push_all(&uid, &state.chat),
+        )
+        .await;
         let access = state.cloud.access_for(&uid);
         if cloud_is_active(state) {
             state.cloud.logout(access.as_deref()).await;

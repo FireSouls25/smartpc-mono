@@ -153,6 +153,7 @@ export const es = {
   "voice.notReady": "No disponible",
   "voice.localNote": "Reconocimiento 100 % local con whisper (sin red).",
   "providers.offline": "no detectado",
+  "providers.needDownload": "requiere descarga",
   "providers.refresh": "Actualizar",
   "providers.start": "Iniciar",
   "providers.starting": "Iniciando…",

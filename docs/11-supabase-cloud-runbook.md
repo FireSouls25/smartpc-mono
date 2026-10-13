@@ -32,6 +32,11 @@ Or paste `supabase/migrations/20260929000100_cloud_history.sql` into the SQL
 editor. It creates `profiles`, `chat_sessions`, `chat_messages`, `actions`,
 enables RLS on all four, and wires the signup trigger.
 
+A second migration (`20261013000100_memory_prefs.sql`) adds `memory_notes`
+(agent memories) and `prefs` (curated renderer keys: theme, language, TTS
+voices, wake word, voice mode). Apply both; PostgREST picks the new tables
+up with no restart.
+
 ## 3. Verify
 
 Fast checks that need nothing but the publishable key:
@@ -52,8 +57,14 @@ Then, in the app:
    required before the first sign-in.
 3. Send a chat message, then look at Settings → Account: the cloud card
    shows enabled, the host, and the pushed/pulled counters.
-4. Sign in from a second machine (or delete the local db): the history and
-   the chosen model come back with the account.
+4. Sign in from a second machine (or delete the local db): the history,
+   the chosen model, the agent memories, and the UI/voice preferences
+   come back with the account. Provider keys are intentionally never
+   synced (OS keychain only) — re-enter them per machine; hardware-local
+   settings (mic, sensitivity, hotkeys) stay local too.
+
+Installers never carry a database (CI asserts `release/staging` is db-free):
+a fresh install starts empty, and login is what brings the account down.
 
 Useful queries while debugging:
 

@@ -115,6 +115,11 @@ describe("sidecar contract", () => {
     // The user's own llama-server keeps its separate entry (external,
     // never started or killed by us).
     expect(ids).toContain("llama.cpp");
+    // Our entry carries the download gate (fresh temp db: nothing on
+    // disk, so the UI points at download instead of "not detected").
+    const smartpc = body.providers.find((p) => p["id"] === "smartpc");
+    expect(typeof smartpc?.["needs_download"]).toBe("boolean");
+    expect(smartpc?.["needs_download"]).toBe(true);
     for (const id of ["anthropic", "openai", "google", "mistral", "groq"]) {
       expect(ids).toContain(id);
     }
@@ -254,6 +259,63 @@ describe("sidecar contract", () => {
       headers: authed,
     });
     expect(del.status).toBe(400);
+  });
+
+  test("renderer prefs round-trip with an allowlist", async () => {
+    const tag = `p${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    await fetch(`${BASE}/v1/auth/register`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const login = await fetch(`${BASE}/v1/auth/login`, {
+      method: "POST",
+      headers: gate,
+      body: JSON.stringify({
+        email: `${tag}@test.co`,
+        password: "correct-horse-1",
+      }),
+    });
+    const tokens = (await login.json()).tokens as { access_token: string };
+    const authed = {
+      ...gate,
+      Authorization: `Bearer ${tokens.access_token}`,
+    };
+    // Fresh account: nothing synced yet.
+    const empty = await fetch(`${BASE}/v1/prefs`, { headers: authed });
+    expect(empty.ok).toBe(true);
+    expect(await empty.json()).toEqual({ prefs: [] });
+    // Curated keys store; everything else 400s.
+    const put = await fetch(`${BASE}/v1/prefs`, {
+      method: "PUT",
+      headers: authed,
+      body: JSON.stringify({ prefs: { "ui.theme": "dark" } }),
+    });
+    expect(put.ok).toBe(true);
+    const got = (await (
+      await fetch(`${BASE}/v1/prefs`, { headers: authed })
+    ).json()) as { prefs: { key: string; value: string }[] };
+    expect(got.prefs).toEqual([{ key: "ui.theme", value: "dark" }]);
+    for (const body of [
+      { prefs: { nope: "1" } },
+      { prefs: { "ui.theme": "x".repeat(129) } },
+    ]) {
+      const bad = await fetch(`${BASE}/v1/prefs`, {
+        method: "PUT",
+        headers: authed,
+        body: JSON.stringify(body),
+      });
+      expect(bad.status).toBe(400);
+    }
+    // No token, no prefs.
+    expect(
+      await (
+        await fetch(`${BASE}/v1/prefs`, { headers: gate })
+      ).status,
+    ).toBe(401);
   });
 
   test("user routes require a bearer token", async () => {

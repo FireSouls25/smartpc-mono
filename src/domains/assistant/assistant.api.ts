@@ -13,10 +13,13 @@ export interface ProviderInfo {
   key_paste: boolean;
   context_window: number | null;
   /** The sidecar knows how to launch this server (ollama via PATH,
-   * llama.cpp app-managed). */
+   * smartpc app-managed). */
   startable: boolean;
   /** Binary resolves on PATH. True when answering; null when N/A. */
   installed: boolean | null;
+  /** Smart PC only: no curated model on disk yet — download first.
+   * Null for every other provider. */
+  needs_download: boolean | null;
 }
 
 export interface KeyStatus {

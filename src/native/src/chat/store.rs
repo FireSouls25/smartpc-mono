@@ -3,7 +3,7 @@
 //! Owns a second SQLite connection to the same file as auth: local traffic
 //! is tiny and SQLite serializes writers, so domains stay decoupled without
 //! a shared pool. Revisit only if contention ever shows up (it won't locally).
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 
@@ -28,6 +28,9 @@ pub struct Export {
     pub messages: Vec<(String, ChatMessageRow)>,
     pub actions: Vec<Action>,
     pub selection: Option<Selection>,
+    pub memory: Vec<MemoryNote>,
+    /// (key, value, updated_at) for every local pref row.
+    pub prefs: Vec<(String, String, String)>,
 }
 
 fn now() -> String {
@@ -605,11 +608,17 @@ impl ChatStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let selection = self.get_selection(user_id)?;
+        let memory = self
+            .list_memory_notes(user_id, i64::MAX)
+            .unwrap_or_default();
+        let prefs = self.list_prefs(user_id).unwrap_or_default();
         Ok(Export {
             sessions,
             messages,
             actions,
             selection,
+            memory,
+            prefs,
         })
     }
 
@@ -684,12 +693,62 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Every local pref row (key, value, updated_at) for the cloud mirror.
+    pub fn list_prefs(&self, user_id: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT key, value, updated_at FROM prefs WHERE user_id = ?1",
+        ) {
+            // Tolerate pre-migration databases like get_pref does.
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let rows = stmt.query_map([user_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Blind import of one cloud pref row: inserts, or overwrites when the
+    /// incoming stamp is strictly newer (same newer-wins as the sessions).
+    /// Returns whether the row was applied.
+    pub fn import_pref(
+        &self,
+        user_id: &str,
+        key: &str,
+        value: &str,
+        updated_at: &str,
+    ) -> rusqlite::Result<bool> {
+        let local: Option<(String, String)> = self
+            .conn
+            .prepare("SELECT value, updated_at FROM prefs WHERE user_id = ?1 AND key = ?2")
+            .and_then(|mut s| {
+                s.query_row(params![user_id, key], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()
+            })?;
+        let wins = match local {
+            None => true,
+            Some((_, ts)) => crate::cloud::sync::remote_wins(updated_at, &ts),
+        };
+        if !wins {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "INSERT INTO prefs(user_id, key, value, updated_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(user_id, key) DO UPDATE SET value = ?3, updated_at = ?4",
+            params![user_id, key, value, updated_at],
+        )?;
+        Ok(true)
+    }
+
     // -----------------------------------------------------------------
-    // Memory layer (wave 14 §3, v1: LOCAL-ONLY). Append-only note log:
-    // there is deliberately NO delete method, and export() above never
-    // includes these rows (no cloud sync in v1 — see schema.sql). Merge
-    // (§3 inline merge) compacts at READ time (exec::merged_topic_view)
-    // so this table stays pure append.
+    // Memory layer (wave 14 §3): append-only note log. Merge (§3 inline
+    // merge) compacts at READ time (exec::merged_topic_view) so this
+    // table stays pure append. Notes ride the cloud export mirror
+    // (push on reconcile, merge-by-id on pull) so a second device adopts
+    // the agent's memories on login.
     // -----------------------------------------------------------------
 
     /// Insert one note. `text` is capped at 280 chars (exec enforces the
@@ -737,6 +796,31 @@ impl ChatStore {
             created_at: ts.clone(),
             updated_at: ts,
         })
+    }
+
+    /// Blind import of one cloud note: inserts, skips existing ids.
+    /// Validation mirrors the backstop (cap, non-empty); a bad row never
+    /// aborts the whole pull. Returns whether the row was applied.
+    pub fn import_memory_note(&self, user_id: &str, note: &MemoryNote) -> rusqlite::Result<bool> {
+        let text = note.text.trim();
+        if text.is_empty() || text.chars().count() > MEMORY_NOTE_MAX_CHARS {
+            return Ok(false);
+        }
+        let rows = self.conn.execute(
+            "INSERT INTO memory_notes(id, user_id, text, topic, source, created_at, updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                note.id,
+                user_id,
+                text,
+                note.topic.as_deref(),
+                note.source,
+                note.created_at,
+                note.updated_at,
+            ],
+        )?;
+        Ok(rows == 1)
     }
 
     /// User-scoped purge (recovery from bad/poisoned memory): deletes
@@ -812,8 +896,8 @@ impl ChatStore {
     }
 }
 
-/// One row of the append-only `memory_notes` log (wave 14 §3, local-only
-/// v1: never synced, never deleted — see schema.sql).
+/// One row of the append-only `memory_notes` log (wave 14 §3). Synced
+/// through the cloud mirror (merge-by-id, never updated).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryNote {
     pub id: String,
@@ -949,6 +1033,59 @@ mod tests {
             .unwrap();
         assert!(s.add_memory_note(&uid, &"x".repeat(281), None, "user").is_err());
         assert!(s.add_memory_note(&uid, "   ", None, "user").is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cloud_imports_are_idempotent_and_newer_wins() {
+        let (path, s, uid) = setup();
+        // Memory: same id twice applies once; bad rows are skipped.
+        let note = super::MemoryNote {
+            id: "m1".to_string(),
+            text: "recuerda esto".to_string(),
+            topic: None,
+            source: "user".to_string(),
+            created_at: "2026-10-13T00:00:00Z".to_string(),
+            updated_at: "2026-10-13T00:00:00Z".to_string(),
+        };
+        assert!(s.import_memory_note(&uid, &note).unwrap());
+        assert!(!s.import_memory_note(&uid, &note).unwrap());
+        let bad = super::MemoryNote {
+            id: "m2".to_string(),
+            text: "   ".to_string(),
+            ..note.clone()
+        };
+        assert!(!s.import_memory_note(&uid, &bad).unwrap());
+        // Prefs: absent applies, older loses, newer overwrites.
+        assert!(
+            s.import_pref(&uid, "ui.theme", "dark", "2026-10-13T00:00:00Z")
+                .unwrap()
+        );
+        assert!(
+            !s.import_pref(&uid, "ui.theme", "light", "2026-10-12T00:00:00Z")
+                .unwrap()
+        );
+        assert_eq!(
+            s.get_pref(&uid, "ui.theme").unwrap().as_deref(),
+            Some("dark")
+        );
+        assert!(
+            s.import_pref(&uid, "ui.theme", "light", "2026-10-14T00:00:00Z")
+                .unwrap()
+        );
+        assert_eq!(
+            s.get_pref(&uid, "ui.theme").unwrap().as_deref(),
+            Some("light")
+        );
+        // Export carries both for the mirror.
+        let export = s.export(&uid).unwrap();
+        assert!(export.memory.iter().any(|m| m.id == "m1"));
+        assert!(
+            export
+                .prefs
+                .iter()
+                .any(|(k, v, _)| k == "ui.theme" && v == "light")
+        );
         std::fs::remove_file(&path).ok();
     }
 

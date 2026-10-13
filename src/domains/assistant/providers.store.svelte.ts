@@ -1,6 +1,7 @@
 // Providers + selection + API keys + availability watch. Standalone: imports
 // nothing from sibling stores (chat/sessions read this, never the reverse).
 import { aiApi, type ProviderInfo } from "./assistant.api";
+import { navigate } from "../../app/router.svelte";
 import { ApiError } from "../../lib/api";
 import { t, type I18nKey } from "../../lib/i18n.svelte";
 
@@ -117,7 +118,17 @@ async function selectProvider(
 ): Promise<void> {
   selectError = "";
   const p = providers.find((x) => x.id === id);
-  if (!p || !p.available) {
+  if (!p) {
+    selectError = t("providers.offline");
+    return;
+  }
+  // Our own entry with nothing on disk yet: choosing it means going to
+  // download, not an error — the models view owns that flow.
+  if (p.id === "smartpc" && p.needs_download === true && model == null) {
+    navigate("settings/5");
+    return;
+  }
+  if (!p.available) {
     selectError = t("providers.offline");
     return;
   }

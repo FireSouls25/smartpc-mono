@@ -236,6 +236,9 @@
           </div>
         {:else}
           <div class="msg-in flex justify-start">
+            <div class="assistant-avatar mt-1 mr-2 shrink-0" aria-hidden="true">
+              <span class="dot" style="background: var(--accent);"></span>
+            </div>
             <div class="flex w-full flex-col gap-1">
               <div class="reply-text">
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
@@ -487,8 +490,13 @@
         options={providers.providers.map((p) => ({
           value: p.id,
           label: p.id,
-          disabled: !p.available,
-          hint: p.available ? undefined : t("providers.offline"),
+          disabled:
+            !p.available && !(p.id === "smartpc" && p.needs_download === true),
+          hint: p.available
+            ? undefined
+            : p.id === "smartpc" && p.needs_download === true
+              ? t("providers.needDownload")
+              : t("providers.offline"),
         }))}
         onChange={(v) => void providers.selectProvider(v)}
       />
@@ -528,3 +536,21 @@
     {/if}
   </div>
 </div>
+
+<style>
+  /* Model avatar: square badge with the accent dot, left of every
+    assistant message (greeting included). */
+  .assistant-avatar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.625rem;
+    height: 1.625rem;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-2);
+  }
+  .assistant-avatar .dot {
+    height: 0.5rem;
+    width: 0.5rem;
+  }
+</style>

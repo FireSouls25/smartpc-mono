@@ -150,6 +150,7 @@ export const en: Record<I18nKey, string> = {
   "voice.notReady": "Unavailable",
   "voice.localNote": "100% local recognition with whisper (offline).",
   "providers.offline": "not detected",
+  "providers.needDownload": "needs download",
   "providers.refresh": "Refresh",
   "providers.start": "Start",
   "providers.starting": "Starting…",

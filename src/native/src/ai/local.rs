@@ -250,6 +250,12 @@ impl LocalLlm {
             .map(|e| e.id)
     }
 
+    /// True when no curated model is on disk: the models view (or the
+    /// fresh-account banner) must send the user to download first.
+    pub fn needs_download(&self) -> bool {
+        self.first_ready_model().is_none()
+    }
+
     pub fn serving(&self) -> Option<(u16, String)> {
         self.server
             .lock()

@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 
 use super::{parse_ts, Cloud};
 use crate::chat::model::{Action, ChatMessageRow, Selection, Session};
-use crate::chat::store::{ChatStore, Export};
+use crate::chat::store::{ChatStore, Export, MemoryNote};
 
 #[derive(Debug)]
 pub enum SyncError {
@@ -139,6 +139,34 @@ pub fn preferences_json(user_id: &str, sel: &Selection, updated_at: &str) -> Val
     json!({
         "id": user_id,
         "preferences": { "provider": sel.provider, "model": sel.model },
+        "updated_at": updated_at,
+    })
+}
+
+pub fn memory_json(user_id: &str, note: &MemoryNote) -> Value {
+    json!({
+        "id": note.id,
+        "user_id": user_id,
+        "text": note.text,
+        "topic": note.topic,
+        "source": note.source,
+        "created_at": note.created_at,
+        "updated_at": note.updated_at,
+    })
+}
+
+/// Row id doubles as the upsert key (`on_conflict=id`), so it carries the
+/// owner: two accounts syncing the same key never collide.
+pub fn pref_row_id(user_id: &str, key: &str) -> String {
+    format!("{user_id}:{key}")
+}
+
+pub fn pref_json(user_id: &str, key: &str, value: &str, updated_at: &str) -> Value {
+    json!({
+        "id": pref_row_id(user_id, key),
+        "user_id": user_id,
+        "key": key,
+        "value": value,
         "updated_at": updated_at,
     })
 }
@@ -338,8 +366,147 @@ impl Cloud {
             }
             offset += count;
         }
+        applied += self.pull_memory(uid, store).await.unwrap_or_else(|e| {
+            if !matches!(e, SyncError::NoToken | SyncError::NotConfigured) {
+                eprintln!("cloud memory pull failed: {e}");
+            }
+            0
+        });
+        applied += self.pull_prefs(uid, store).await.unwrap_or_else(|e| {
+            if !matches!(e, SyncError::NoToken | SyncError::NotConfigured) {
+                eprintln!("cloud prefs pull failed: {e}");
+            }
+            0
+        });
         if applied > 0 {
             self.note_pulled(applied as u64);
+        }
+        Ok(applied)
+    }
+
+    /// Merge the account's memory notes (insert-missing only: notes are
+    /// append-only on both sides, ids are globally unique).
+    async fn pull_memory(
+        &self,
+        uid: &str,
+        store: &Arc<Mutex<ChatStore>>,
+    ) -> Result<usize, SyncError> {
+        #[derive(serde::Deserialize)]
+        struct RemoteNote {
+            id: String,
+            #[serde(default)]
+            text: String,
+            topic: Option<String>,
+            #[serde(default)]
+            source: String,
+            #[serde(default)]
+            created_at: String,
+            #[serde(default)]
+            updated_at: String,
+        }
+        let access = self.access_for(uid).ok_or(SyncError::NoToken)?;
+        let cfg = self.config().ok_or(SyncError::NotConfigured)?;
+        let url = format!(
+            "{}/memory_notes?select=id,text,topic,source,created_at,updated_at&order=updated_at.desc&limit=2000",
+            cfg.rest_root()
+        );
+        let res = self
+            .client()
+            .get(&url)
+            .headers(self.rest_headers(&access, None))
+            .send()
+            .await
+            .map_err(|e| SyncError::Unreachable(e.to_string()))?;
+        let status = res.status().as_u16();
+        let text = res.text().await.map_err(|e| SyncError::Unreachable(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            // Pre-migration projects have no table yet: skip, don't fail.
+            if status == 404 {
+                return Ok(0);
+            }
+            return Err(SyncError::Rejected {
+                status,
+                body: text.chars().take(300).collect(),
+            });
+        }
+        let batch: Vec<RemoteNote> = serde_json::from_str(&text)
+            .map_err(|e| SyncError::Unreachable(format!("bad memory pull: {e}")))?;
+        let guard = store
+            .lock()
+            .map_err(|e| SyncError::Unreachable(format!("local store busy: {e}")))?;
+        let mut applied = 0usize;
+        for remote in &batch {
+            let note = MemoryNote {
+                id: remote.id.clone(),
+                text: remote.text.clone(),
+                topic: remote.topic.clone(),
+                source: if remote.source.is_empty() {
+                    "extracted".to_string()
+                } else {
+                    remote.source.clone()
+                },
+                created_at: normalize_ts(&remote.created_at),
+                updated_at: normalize_ts(&remote.updated_at),
+            };
+            applied += usize::from(
+                guard.import_memory_note(uid, &note).unwrap_or(false),
+            );
+        }
+        Ok(applied)
+    }
+
+    /// Merge the account's renderer prefs (newer-wins per key, shared
+    /// helper with the sessions path).
+    async fn pull_prefs(
+        &self,
+        uid: &str,
+        store: &Arc<Mutex<ChatStore>>,
+    ) -> Result<usize, SyncError> {
+        #[derive(serde::Deserialize)]
+        struct RemotePref {
+            key: String,
+            #[serde(default)]
+            value: String,
+            #[serde(default)]
+            updated_at: String,
+        }
+        let access = self.access_for(uid).ok_or(SyncError::NoToken)?;
+        let cfg = self.config().ok_or(SyncError::NotConfigured)?;
+        let url = format!(
+            "{}/prefs?select=key,value,updated_at&limit=100",
+            cfg.rest_root()
+        );
+        let res = self
+            .client()
+            .get(&url)
+            .headers(self.rest_headers(&access, None))
+            .send()
+            .await
+            .map_err(|e| SyncError::Unreachable(e.to_string()))?;
+        let status = res.status().as_u16();
+        let text = res.text().await.map_err(|e| SyncError::Unreachable(e.to_string()))?;
+        if !(200..300).contains(&status) {
+            if status == 404 {
+                return Ok(0);
+            }
+            return Err(SyncError::Rejected {
+                status,
+                body: text.chars().take(300).collect(),
+            });
+        }
+        let batch: Vec<RemotePref> = serde_json::from_str(&text)
+            .map_err(|e| SyncError::Unreachable(format!("bad prefs pull: {e}")))?;
+        let guard = store
+            .lock()
+            .map_err(|e| SyncError::Unreachable(format!("local store busy: {e}")))?;
+        let mut applied = 0usize;
+        for remote in &batch {
+            if guard
+                .import_pref(uid, &remote.key, &remote.value, &remote.updated_at)
+                .unwrap_or(false)
+            {
+                applied += 1;
+            }
         }
         Ok(applied)
     }
@@ -380,6 +547,14 @@ impl Cloud {
         }
         for a in &export.actions {
             self.upsert(&access, "actions", action_json(uid, a)).await?;
+            pushed += 1;
+        }
+        for m in &export.memory {
+            self.upsert(&access, "memory_notes", memory_json(uid, m)).await?;
+            pushed += 1;
+        }
+        for (key, value, updated_at) in &export.prefs {
+            self.upsert(&access, "prefs", pref_json(uid, key, value, updated_at)).await?;
             pushed += 1;
         }
         if let Some(sel) = &export.selection {

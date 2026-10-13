@@ -1588,6 +1588,20 @@ fn risky_allowed(store: &ChatStore, uid: &str) -> (bool, &'static str) {
     (on, if on { "toggle" } else { "none" })
 }
 
+/// Renderer preferences mirrored to the cloud. Curated allowlist: UI +
+/// voice behavior that make sense on another machine. Hardware-local keys
+/// (mic device, sensitivity, hotkey, STT model) and everything secret stay
+/// local-only. Values ride the export mirror (login/sync/logout), so writes
+/// here never touch the network directly.
+pub const SYNCABLE_PREFS: &[&str] = &[
+    "ui.theme",
+    "ui.lang",
+    "voice.tts.es",
+    "voice.tts.en",
+    "voice.wake",
+    "voice.mode",
+];
+
 /// T4 D5: read the risky-input toggle. `{allowed, source: toggle|env|none}`.
 /// The renderer mirror is non-authoritative: `Policy::for_user` re-resolves
 /// env-OR-toggle on every tool call.
@@ -1605,6 +1619,68 @@ pub async fn get_risky_input(
         Json(serde_json::json!({ "allowed": allowed, "source": source })),
     )
         .into_response()
+}
+
+/// Read the synced renderer prefs (what login on another machine applies).
+/// Missing keys are simply absent — the renderer keeps its local values.
+pub async fn get_prefs(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+) -> impl IntoResponse {
+    let store = match lock_chat(&s) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    let prefs: Vec<serde_json::Value> = SYNCABLE_PREFS
+        .iter()
+        .filter_map(|k| {
+            store.get_pref(&uid, k).ok().flatten().map(|value| {
+                serde_json::json!({ "key": k, "value": value })
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "prefs": prefs }))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PrefsBody {
+    pub prefs: std::collections::HashMap<String, String>,
+}
+
+/// Store renderer prefs for the cloud mirror. Unknown keys and oversized
+/// values fail the whole write (client bug — nothing is half-applied).
+pub async fn put_prefs(
+    State(s): State<AppState>,
+    Extension(AuthedUser(uid)): Extension<AuthedUser>,
+    Json(b): Json<PrefsBody>,
+) -> impl IntoResponse {
+    for (key, value) in &b.prefs {
+        if !SYNCABLE_PREFS.contains(&key.as_str()) || value.chars().count() > 128 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": { "code": "validation", "message": "bad pref", "field": key }
+                })),
+            )
+                .into_response();
+        }
+    }
+    let store = match lock_chat(&s) {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    for (key, value) in &b.prefs {
+        if store.set_pref(&uid, key, value).is_err() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": { "code": "internal", "message": "internal server error" }
+                })),
+            )
+                .into_response();
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 #[derive(Deserialize)]

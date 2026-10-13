@@ -101,9 +101,12 @@ jobs:
 
       # Smoke: the staged sidecar binary boots and answers /health.
       # Portable shell (git-bash on Windows): start, probe, kill.
+      # Fresh-build proof: installers never carry a database — first boot
+      # creates userData fresh, and cloud login restores the account.
       - name: Smoke-test the sidecar binary
         shell: bash
         run: |
+          test -z "$(find release/staging -name '*.db' 2>/dev/null)"
           BIN="release/staging/bin/smartpc-native"
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
           test -x "$BIN"

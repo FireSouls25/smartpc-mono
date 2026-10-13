@@ -205,6 +205,9 @@ pub async fn catalog(state: &crate::api::AppState) -> Vec<Value> {
         "context_window": 8192,
         "startable": true,
         "installed": state.llm.binary_present(),
+        // Drives the "download first" hint (and the models-view CTA)
+        // instead of a misleading "not detected".
+        "needs_download": state.llm.needs_download(),
     }));
     out.push(ollama);
     out.push(legacy);
@@ -280,6 +283,8 @@ async fn fallback() -> Vec<Value> {
             "context_window": 8192,
             "startable": true,
             "installed": crate::ai::local::LocalLlm::packaged_server_binary().is_some(),
+            // Stateless fallback: lean toward the download CTA.
+            "needs_download": true,
         }),
         ollama,
         legacy,

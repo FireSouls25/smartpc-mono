@@ -170,6 +170,10 @@ pub fn router(state: AppState) -> Router {
             get(crate::chat::routes::get_risky_input).put(crate::chat::routes::put_risky_input),
         )
         .route(
+            "/v1/prefs",
+            get(crate::chat::routes::get_prefs).put(crate::chat::routes::put_prefs),
+        )
+        .route(
             "/v1/support/audit-export",
             get(crate::chat::routes::audit_export),
         )

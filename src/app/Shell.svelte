@@ -12,6 +12,10 @@
   import { installVoiceHotkey } from "../domains/voice/voice.store.svelte";
   import { fetchHealth, SIDECAR_PROTOCOL } from "../lib/api";
   import { t } from "../lib/i18n.svelte";
+  import { getTheme } from "../lib/theme.svelte";
+  import { getLang } from "../lib/i18n.svelte";
+  import { voice } from "../domains/voice/voice.store.svelte";
+  import { pullApplyPrefs, pushPrefsIfChanged } from "../lib/prefs";
 
   // Settings is a route (#/settings[/section]), not local state: deep-linkable,
   // browser back works, reload keeps the page.
@@ -37,6 +41,27 @@
   });
 
   onDestroy(() => providers.stopProviderWatch());
+
+  // Cross-machine prefs: adopt the cloud set once per login (register,
+  // login, session resume), then mirror local edits back up. Echo-safe:
+  // pull snapshots after applying, push skips unchanged signatures.
+  let authedOnce = false;
+  $effect(() => {
+    if (auth.token && !authedOnce) {
+      authedOnce = true;
+      void pullApplyPrefs();
+    } else if (!auth.token) {
+      authedOnce = false;
+    }
+  });
+  $effect(() => {
+    void getTheme();
+    void getLang();
+    void voice.mode;
+    void voice.wakeWord;
+    void voice.ttsVoice;
+    if (auth.token) void pushPrefsIfChanged();
+  });
 
   // Global push-to-talk: the mic toggle shortcut works from anywhere.
   onMount(() => installVoiceHotkey());
