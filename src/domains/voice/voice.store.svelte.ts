@@ -22,7 +22,45 @@ const DEVICE_KEY = "smartpc.voice.device";
 const SPEAK_KEY = "smartpc.voice.speak";
 const SENS_KEY = "smartpc.voice.sensitivity";
 const STT_MODEL_KEY = "smartpc.voice.sttModel";
-const ttsVoiceKey = (lang: string): string => `smartpc.voice.ttsVoice.${lang}`;
+const ttsVoiceKey = (lang: string): string =>
+  `smartpc.voice.ttsVoice.${voiceUserId ?? "device"}.${lang}`;
+
+/** Storage key for one account's voice (null = pre-login device key).
+ * Exported for the prefs mirror, which reads both languages directly. */
+export function ttsVoiceKeyFor(userId: string | null, lang: string): string {
+  return `smartpc.voice.ttsVoice.${userId ?? "device"}.${lang}`;
+}
+
+// TTS voice is per ACCOUNT, not per device: two local accounts on one
+// machine keep their own picks (cloud prefs carry them across machines).
+// Null = signed out (device default); set from the auth transition.
+let voiceUserId: string | null = null;
+
+/** Switch the active account: reload its voice, adopting the legacy
+ * device-global pick once when the account has never chosen. */
+export function setVoiceUser(id: string | null): void {
+  voiceUserId = id;
+  if (id) {
+    for (const lang of ["es", "en"]) {
+      const scoped = ttsVoiceKeyFor(id, lang);
+      const legacy = `smartpc.voice.ttsVoice.${lang}`;
+      try {
+        if (
+          window.localStorage.getItem(scoped) === null &&
+          window.localStorage.getItem(legacy) !== null
+        ) {
+          window.localStorage.setItem(
+            scoped,
+            window.localStorage.getItem(legacy) ?? "",
+          );
+        }
+      } catch {
+        /* private mode */
+      }
+    }
+  }
+  ttsVoice = loadTtsVoice();
+}
 const HOTKEY_KEY = "smartpc.voice.hotkey";
 export const DEFAULT_WAKE_WORD = "hey";
 /** Mic toggle shortcut. Shown on the mic button and editable in settings. */

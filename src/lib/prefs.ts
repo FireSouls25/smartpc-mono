@@ -6,18 +6,25 @@ import { api } from "./api";
 import { auth } from "../domains/auth/auth.store.svelte";
 import { getTheme, setTheme, type Theme } from "./theme.svelte";
 import { getLang, setLang, type Lang } from "./i18n.svelte";
-import { voice } from "../domains/voice/voice.store.svelte";
+import {
+  voice,
+  ttsVoiceKeyFor,
+  setVoiceUser,
+} from "../domains/voice/voice.store.svelte";
 import type { VoiceMode } from "../domains/voice/voice.store.svelte";
 
 const THEMES: Theme[] = ["light", "dark", "auto"];
 const MODES: VoiceMode[] = ["manual", "conversation", "wake"];
 
 function snapshot(): Record<string, string> {
+  // TTS voices are per account (voice store namespaces by user, with a
+  // device fallback pre-login): read the same keys the store uses.
+  const uid = auth.user?.id ?? null;
   let ttsEs = "";
   let ttsEn = "";
   try {
-    ttsEs = window.localStorage.getItem("smartpc.voice.ttsVoice.es") ?? "";
-    ttsEn = window.localStorage.getItem("smartpc.voice.ttsVoice.en") ?? "";
+    ttsEs = window.localStorage.getItem(ttsVoiceKeyFor(uid, "es")) ?? "";
+    ttsEn = window.localStorage.getItem(ttsVoiceKeyFor(uid, "en")) ?? "";
   } catch {
     /* private mode */
   }
@@ -56,6 +63,9 @@ export async function pushPrefsIfChanged(): Promise<void> {
 
 /** Adopt the cloud prefs after auth (login/register/session resume). */
 export async function pullApplyPrefs(): Promise<void> {
+  // Voice picks are namespaced per account: switch first so both the
+  // apply below and every later read hit this account's keys.
+  setVoiceUser(auth.user?.id ?? null);
   if (!auth.token) return;
   try {
     const res = await api<{ prefs: { key: string; value: string }[] }>(

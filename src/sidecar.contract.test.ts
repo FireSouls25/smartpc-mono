@@ -318,6 +318,55 @@ describe("sidecar contract", () => {
     ).toBe(401);
   });
 
+  test("accounts never see each other's sessions", async () => {
+    const mkUser = async (tag: string) => {
+      await fetch(`${BASE}/v1/auth/register`, {
+        method: "POST",
+        headers: gate,
+        body: JSON.stringify({
+          email: `${tag}@test.co`,
+          password: "correct-horse-1",
+        }),
+      });
+      const login = await fetch(`${BASE}/v1/auth/login`, {
+        method: "POST",
+        headers: gate,
+        body: JSON.stringify({
+          email: `${tag}@test.co`,
+          password: "correct-horse-1",
+        }),
+      });
+      const tokens = (await login.json()).tokens as { access_token: string };
+      return { ...gate, Authorization: `Bearer ${tokens.access_token}` };
+    };
+    const tag = `x${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+    const a = await mkUser(`${tag}a`);
+    const b = await mkUser(`${tag}b`);
+    // A creates (no model needed for an empty session row).
+    const created = (await (
+      await fetch(`${BASE}/v1/chat/sessions`, {
+        method: "POST",
+        headers: a,
+        body: JSON.stringify({ title: "a-private" }),
+      })
+    ).json()) as { session: { id: string } };
+    // B lists nothing and cannot fetch, delete, or select into it.
+    const listed = (await (
+      await fetch(`${BASE}/v1/chat/sessions`, { headers: b })
+    ).json()) as { sessions: { id: string }[] };
+    expect(listed.sessions.map((s) => s.id)).not.toContain(created.session.id);
+    for (const [method, url] of [
+      ["GET", `${BASE}/v1/chat/sessions/${created.session.id}`],
+      ["DELETE", `${BASE}/v1/chat/sessions/${created.session.id}`],
+    ] as const) {
+      const res = await fetch(url, { method, headers: b });
+      expect(res.status).toBe(404);
+    }
+    // B's own selection starts empty even though A may choose later.
+    const sel = await fetch(`${BASE}/v1/ai/selection`, { headers: b });
+    expect(await sel.json()).toEqual({ provider: null, model: null });
+  });
+
   test("user routes require a bearer token", async () => {
     const res = await fetch(`${BASE}/v1/chat/sessions`, { headers: gate });
     expect(res.status).toBe(401);

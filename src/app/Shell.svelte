@@ -14,7 +14,7 @@
   import { t } from "../lib/i18n.svelte";
   import { getTheme } from "../lib/theme.svelte";
   import { getLang } from "../lib/i18n.svelte";
-  import { voice } from "../domains/voice/voice.store.svelte";
+  import { voice, setVoiceUser } from "../domains/voice/voice.store.svelte";
   import { pullApplyPrefs, pushPrefsIfChanged } from "../lib/prefs";
 
   // Settings is a route (#/settings[/section]), not local state: deep-linkable,
@@ -32,12 +32,8 @@
 
   onMount(() => {
     syncAuthRoute(auth.user);
-    if (auth.user) {
-      void providers
-        .loadProviders()
-        .then(() => sessions.refreshSessions())
-        .then(() => providers.startProviderWatch());
-    }
+    // First load rides the token effect below (it fires after the async
+    // session restore too — this mount runs before restore completes).
   });
 
   onDestroy(() => providers.stopProviderWatch());
@@ -49,9 +45,19 @@
   $effect(() => {
     if (auth.token && !authedOnce) {
       authedOnce = true;
+      // New sign-in on a mounted shell (login/register/switch): reload
+      // everything user-scoped — otherwise the previous account's (or
+      // empty) provider, sessions and voice leak into this one.
+      void providers
+        .loadProviders()
+        .then(() => sessions.refreshSessions())
+        .then(() => providers.startProviderWatch());
       void pullApplyPrefs();
     } else if (!auth.token) {
       authedOnce = false;
+      providers.stopProviderWatch();
+      // Signed out: voice prefs fall back to the device key.
+      setVoiceUser(null);
     }
   });
   $effect(() => {
