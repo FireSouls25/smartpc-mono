@@ -115,7 +115,14 @@ function stagePiBridge() {
   }
   for (const e of fs.readdirSync(nm, { withFileTypes: true })) {
     if (!e.isDirectory()) continue;
-    if (e.name.startsWith("@types") || e.name === ".package-lock.json")
+    // Skip type-only trees, npm metadata, and .bin shims: nothing
+    // executes them at runtime (node resolves packages directly), and
+    // .bin symlinks break staging on Windows without privilege.
+    if (
+      e.name.startsWith("@types") ||
+      e.name === ".bin" ||
+      e.name === ".package-lock.json"
+    )
       continue;
     fs.cpSync(path.join(nm, e.name), path.join(destDeps, e.name), {
       recursive: true,

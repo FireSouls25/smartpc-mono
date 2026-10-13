@@ -14,9 +14,9 @@
 #   only (cpal/ALSA, keyring/dbus, screenshots+enigo/X11). macOS/Windows need
 #   no audio/X headers (CoreAudio/WASAPI, native keychain/credential store).
 # - MSVC is the default Rust toolchain on windows-latest (no override).
-# - Node 26+ is a *runtime* prerequisite on user machines (pi agent + TTS
-#   synth daemon are spawned via node/npx and are NOT bundled); the app
-#   starts without it and says so. Nothing to install for it here.
+# - Node 26+ is a *runtime* prerequisite on user machines (the vendored
+#   pi CLI and the TTS synth daemon spawn via node; only plain `node` is
+#   needed, not npm). The app starts without it and says so.
 # - macOS output is unsigned (Gatekeeper warning until signing is set up);
 #   Windows builds an NSIS exe; Linux builds AppImage + tarball; macOS a dmg.
 #   Update metadata (latest*.yml, *.blockmap) is never uploaded to Releases.
