@@ -107,6 +107,16 @@
 
   const engineOn = () => providers.activeAvailable();
 
+  // Purple reserved for the newest assistant message; earlier ones get
+  // a muted badge so the eye lands on the latest turn.
+  const lastAssistantIdx = () => {
+    const arr = chat.messages;
+    for (let j = arr.length - 1; j >= 0; j--) {
+      if (arr[j].role !== "user") return j;
+    }
+    return -1;
+  };
+
   // TTS voice catalog for the quick picker below the orb (same source
   // as Settings → Voice; picking only sets the pref, the daemon
   // downloads on first speak like everywhere else).
@@ -271,13 +281,21 @@
                 class="assistant-avatar mt-1 mr-2 shrink-0"
                 aria-hidden="true"
               >
-                <span class="dot" style="background: var(--accent);"></span>
+                <span
+                  class="dot"
+                  style="background: {i === lastAssistantIdx()
+                    ? 'var(--accent)'
+                    : 'var(--fg-faint)'}"
+                ></span>
               </div>
               <div
                 class="flex w-full min-w-0 flex-col justify-center gap-1"
                 style="min-height: 1.625rem;"
               >
-                <div class="reply-text">
+                <div
+                  class="reply-text"
+                  style="margin-inline: 0; max-width: 100%;"
+                >
                   <!-- eslint-disable-next-line svelte/no-at-html-tags -- formatReply escapes all HTML first -->
                   {@html formatReply(m.textKey ? t(m.textKey) : m.text)}
                 </div>
@@ -349,7 +367,7 @@
                   </div>
                 {/if}
                 {#if m.steps?.length}
-                  <div class="flex flex-wrap gap-1 pl-1">
+                  <div class="flex flex-wrap gap-1">
                     {#each m.steps as st, j (j)}
                       <span
                         class="chip"

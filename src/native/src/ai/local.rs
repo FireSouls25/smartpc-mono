@@ -91,9 +91,10 @@ pub fn server_asset() -> Option<ServerAsset> {
     None
 }
 
-/// Curated GGUF catalog: ~4B-class instruction models, ungated licenses,
-/// official or high-trust quant repos. Sizes + sha256 are HF LFS oids
-/// (content hashes), verified on every download.
+/// Curated GGUF catalog: ungated licenses, official or high-trust quant
+/// repos. 4B-class defaults (fast, small) plus an 8B tier for tool-heavy
+/// turns small models fumble. Sizes + sha256 are HF LFS oids (content
+/// hashes), verified on every download.
 pub struct ModelEntry {
     pub id: &'static str,
     pub label: &'static str,
@@ -119,6 +120,14 @@ pub const MODEL_CATALOG: &[ModelEntry] = &[
         url: "https://huggingface.co/bartowski/microsoft_Phi-4-mini-instruct-GGUF/resolve/main/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf",
         size: 2_491_874_688,
         sha256: "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2",
+    },
+    ModelEntry {
+        id: "qwen3-8b",
+        label: "Qwen 3 8B",
+        params: "8B",
+        url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+        size: 5_027_783_488,
+        sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
     },
 ];
 

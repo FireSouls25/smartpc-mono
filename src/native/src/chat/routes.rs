@@ -1035,6 +1035,14 @@ fn pi_error(e: &crate::pi::supervisor::PiError) -> Response {
         E::Unavailable(_) => (500u16, "misconfigured", e.message()),
         E::Rpc(_) | E::TurnFailed(_) => (502u16, "ai_upstream", e.message()),
     };
+    // Every turn failure lands here (both endpoints funnel through
+    // pi_chat_turn): without this line a failed turn is invisible in the
+    // terminal and only surfaces as a UI bubble. Truncated: messages may
+    // echo tool output.
+    crate::diagnostics::push(format!(
+        "[pi-run] FAILED code={code}: {}",
+        message.chars().take(200).collect::<String>()
+    ));
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         Json(serde_json::json!({ "error": { "code": code, "message": message } })),
@@ -1243,7 +1251,6 @@ async fn pi_chat_turn(
             .collect::<Vec<_>>(),
         rotated,
     );
-    eprintln!("{run_line}");
     crate::diagnostics::push(run_line);
     Ok(PiTurnDone {
         reply: out.reply,
