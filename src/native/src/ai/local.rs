@@ -494,9 +494,32 @@ impl LocalLlm {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         let mut removed = false;
+        // Windows locks files mapped by a dying process (and antivirus /
+        // indexer holds transient locks): retry briefly instead of failing
+        // a delete whose server stop just landed.
         if let Some(p) = self.model_path(id) {
-            if std::fs::remove_file(&p).is_ok() {
-                removed = true;
+            let mut gone = !p.exists();
+            for _ in 0..4 {
+                if gone {
+                    break;
+                }
+                match std::fs::remove_file(&p) {
+                    Ok(()) => {
+                        removed = true;
+                        gone = true;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        gone = true;
+                    }
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                }
+            }
+            if !gone {
+                return Err(format!(
+                    "could not delete {id} (file locked — stop any server holding it and retry)"
+                ));
             }
         }
         if std::fs::remove_file(self.part_path(id)).is_ok() {
@@ -1077,7 +1100,11 @@ pub async fn delete_model(
             )
                 .into_response()
         }
-        Err(e) => bad("internal", e, axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => bad(
+            "delete_failed",
+            e,
+            axum::http::StatusCode::CONFLICT,
+        ),
     }
 }
 
@@ -1376,6 +1403,25 @@ mod tests {
         // Bogus pid: nothing to kill, pidfile gone either way.
         assert!(!llm.pidfile().exists());
         assert!(llm.serving().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_model_removes_files_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("smartpc-del-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let llm = LocalLlm::new(dir.clone());
+        // Fake weights (delete checks catalog membership, not size).
+        let models = llm.models_dir();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("qwen3-4b.gguf"), b"fake").unwrap();
+        std::fs::write(models.join("qwen3-4b.gguf.part"), b"part").unwrap();
+        assert!(llm.delete_model("qwen3-4b").await.unwrap());
+        assert!(!models.join("qwen3-4b.gguf").exists());
+        assert!(!models.join("qwen3-4b.gguf.part").exists());
+        // Second delete: nothing left, still ok.
+        assert!(!llm.delete_model("qwen3-4b").await.unwrap());
+        assert!(llm.delete_model("nope").await.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

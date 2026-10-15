@@ -219,8 +219,42 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("before-quit", () => {
-  if (sidecar) sidecar.kill();
+let quitting = false;
+app.on("before-quit", (e) => {
+  if (!sidecar || quitting) return;
+  // Windows has no SIGTERM: an instant TerminateProcess would orphan the
+  // managed llama-server (which then locks the .gguf on disk, so model
+  // deletes fail until the next boot reaps it). Kill the whole tree.
+  // Unix keeps the plain SIGTERM: the sidecar's graceful shutdown stops
+  // its children itself.
+  if (process.platform !== "win32") {
+    sidecar.kill();
+    return;
+  }
+  e.preventDefault();
+  quitting = true;
+  const done = () => {
+    sidecar = null;
+    app.quit();
+  };
+  try {
+    const killer = spawn(
+      "taskkill",
+      ["/pid", String(sidecar.pid), "/T", "/F"],
+      { stdio: "ignore" },
+    );
+    const timer = setTimeout(done, 8000);
+    killer.on("exit", () => {
+      clearTimeout(timer);
+      done();
+    });
+    killer.on("error", () => {
+      clearTimeout(timer);
+      done();
+    });
+  } catch {
+    done();
+  }
 });
 
 app.on("window-all-closed", () => {
