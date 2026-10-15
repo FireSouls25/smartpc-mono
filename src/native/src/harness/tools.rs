@@ -58,6 +58,51 @@ pub fn catalog() -> Vec<ToolDef> {
             records_action: false,
         },
         ToolDef {
+            name: "search_files",
+            description: "Find files by fuzzy name under a folder (default: home). Use when the user names a file, or to locate config, documents, or code before reading. Hidden files, caches/build dirs (target, node_modules, .git) and files over 1 MB are skipped; symlinks never followed. Prefer local providers for sensitive trees: matches flow back into the turn like any tool output.",
+            parameters: schema(
+                json!({
+                    "query": { "type": "string", "description": "Fuzzy fragments, e.g. 'budget xlsx' or 'main rs'" },
+                    "root": { "type": "string", "description": "Folder to search (default: home). Must stay inside home or temp" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Max files (default 20)" },
+                }),
+                &["query"],
+            ),
+            risk: Risk::ReadOnly,
+            records_action: false,
+        },
+        ToolDef {
+            name: "search_content",
+            description: "Search file contents under a folder (default: home). Literal text by default, regex with regex:true. Use to find where something is defined, configured, or mentioned. Same skips as search_files (hidden, caches, >1 MB, symlinks); binary files stop at the first NUL. Lines truncate at 200 chars. Prefer local providers for sensitive trees.",
+            parameters: schema(
+                json!({
+                    "pattern": { "type": "string", "description": "Text (or regex with regex:true) to find" },
+                    "root": { "type": "string", "description": "Folder to search (default: home). Must stay inside home or temp" },
+                    "regex": { "type": "boolean", "description": "Treat pattern as a regular expression (default false)" },
+                    "case_insensitive": { "type": "boolean", "description": "Case-insensitive match (default true)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max matches across files (default 30)" },
+                }),
+                &["pattern"],
+            ),
+            risk: Risk::ReadOnly,
+            records_action: false,
+        },
+        ToolDef {
+            name: "read_file",
+            description: "Read a text file (follow-up to search hits). Same root policy as search_files: paths resolve under the given root (default: home) and cannot escape it; files over 1 MB and non-text files refuse. Paginated: offset is 1-based, default 200 lines.",
+            parameters: schema(
+                json!({
+                    "path": { "type": "string", "description": "File path, relative to root (e.g. 'docs/notes.md')" },
+                    "root": { "type": "string", "description": "Base folder (default: home). Must stay inside home or temp" },
+                    "offset": { "type": "integer", "minimum": 1, "description": "First line, 1-based (default 1)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Max lines (default 200)" },
+                }),
+                &["path"],
+            ),
+            risk: Risk::ReadOnly,
+            records_action: false,
+        },
+        ToolDef {
             name: "open_app",
             description: "Launch an application by name (e.g. firefox, code, Calculator). No arguments, no URLs, no shell — just the app name. Friendly names (terminal, browser, editor, files, calculator) resolve automatically; the result names the exact binary started.",
             parameters: schema(
@@ -565,6 +610,9 @@ pub(crate) fn title_for(tool: &str, args: &serde_json::Value) -> String {
         "memory_note" => "Guardar nota".to_string(),
         "memory_purge" => "Purgar memoria".to_string(),
         "memory_recall" => "Buscar en memoria".to_string(),
+        "search_files" => format!("Buscar archivos {}", arg("query")),
+        "search_content" => format!("Buscar en archivos {}", arg("pattern")),
+        "read_file" => format!("Leer {}", arg("path")),
         "memory_zoom" => "Ver notas del tema".to_string(),
         _ => tool.to_string(),
     }

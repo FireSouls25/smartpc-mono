@@ -27,6 +27,12 @@ chrono = { version = "0.4", features = ["serde"] }
 email_address = "0.2"
 # Local-model providers: OpenAI-compatible chat (Ollama, llama.cpp server).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+# Agent file search: gitignore-aware walking (ignore), fuzzy path ranking
+# (nucleo-matcher), and content search (ripgrep's grep crate). All pure
+# Rust, no background threads, no on-disk state.
+ignore = "0.4"
+nucleo-matcher = "0.3"
+grep = "0.4"
 # Managed llama.cpp runtime: server archive extraction (zip for Windows,
 # tar.gz for unix) for the on-demand binary download.
 zip = { version = "2", default-features = false, features = ["deflate"] }

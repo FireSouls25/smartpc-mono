@@ -18,4 +18,5 @@ pub mod exec;
 pub mod platform;
 pub mod prompt;
 pub mod screen;
+pub mod search;
 pub mod tools;

@@ -624,6 +624,9 @@ pub async fn execute(
         match tool_name.as_str() {
             "get_system_context" => tool_context(&args),
             "list_processes" => tool_processes(&args),
+            "search_files" => tool_search_files(&args),
+            "search_content" => tool_search_content(&args),
+            "read_file" => tool_read_file(&args),
             "open_app" => tool_open_app(&args),
             "press_key" => tool_press_key(&args),
             "close_app" => tool_close_app(&args),
@@ -789,6 +792,71 @@ fn tool_processes(args: &serde_json::Value) -> ToolOutcome {
     procs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     procs.truncate(limit);
     ok(serde_json::Value::Array(procs).to_string())
+}
+
+fn tool_search_files(args: &serde_json::Value) -> ToolOutcome {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if query.is_empty() {
+        return err("query is required".to_string());
+    }
+    let root = match super::search::resolve_root(args.get("root").and_then(|v| v.as_str())) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20).clamp(1, 50) as usize;
+    let hits = super::search::search_files(&root, query, limit);
+    ok(serde_json::json!({
+        "root": root.to_string_lossy(),
+        "query": query,
+        "files": hits.iter().map(|(p, s)| serde_json::json!({ "path": p, "score": s })).collect::<Vec<_>>(),
+    })
+    .to_string())
+}
+
+fn tool_search_content(args: &serde_json::Value) -> ToolOutcome {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    if pattern.trim().is_empty() {
+        return err("pattern is required".to_string());
+    }
+    let root = match super::search::resolve_root(args.get("root").and_then(|v| v.as_str())) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
+    let case_insensitive = args.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(true);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(30).clamp(1, 100) as usize;
+    match super::search::search_content(&root, pattern, regex, case_insensitive, limit) {
+        Ok((hits, truncated)) => ok(serde_json::json!({
+            "root": root.to_string_lossy(),
+            "pattern": pattern,
+            "matches": hits.iter().map(|(p, line, text)| serde_json::json!({ "path": p, "line": line, "text": text })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        })
+        .to_string()),
+        Err(e) => err(e),
+    }
+}
+
+fn tool_read_file(args: &serde_json::Value) -> ToolOutcome {
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.trim().is_empty() {
+        return err("path is required".to_string());
+    }
+    let root = match super::search::resolve_root(args.get("root").and_then(|v| v.as_str())) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(200).clamp(1, 500) as usize;
+    match super::search::read_file(&root, path, offset, limit) {
+        Ok((lines, total)) => ok(serde_json::json!({
+            "path": path,
+            "total_lines": total,
+            "lines": lines.iter().map(|(n, t)| serde_json::json!({ "line": n, "text": t })).collect::<Vec<_>>(),
+        })
+        .to_string()),
+        Err(e) => err(e),
+    }
 }
 
 fn tool_open_app(args: &serde_json::Value) -> ToolOutcome {

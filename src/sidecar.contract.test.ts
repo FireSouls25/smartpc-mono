@@ -775,6 +775,37 @@ describe("sidecar contract", () => {
     expect(body.protocol).toBe(5);
   });
 
+  test("file search tools are listed with honest schemas", async () => {
+    const res = await fetch(`${BASE}/internal/pi/tools`, {
+      method: "POST",
+      headers: gate,
+    });
+    expect(res.ok).toBe(true);
+    const body = (await res.json()) as {
+      tools: {
+        name: string;
+        description: string;
+        parameters: {
+          type: string;
+          properties: Record<string, { description?: string }>;
+          required: string[];
+          additionalProperties: boolean;
+        };
+      }[];
+    };
+    const byName = new Map(body.tools.map((t) => [t.name, t]));
+    const files = byName.get("search_files");
+    expect(files).toBeDefined();
+    expect(files!.parameters.required).toEqual(["query"]);
+    expect(files!.description).toContain("home");
+    const content = byName.get("search_content");
+    expect(content).toBeDefined();
+    expect(content!.parameters.required).toEqual(["pattern"]);
+    const read = byName.get("read_file");
+    expect(read).toBeDefined();
+    expect(read!.parameters.required).toEqual(["path"]);
+  });
+
   test("T4 control: catalog carries mouse/key tools + honest type_text", async () => {
     const res = await fetch(`${BASE}/internal/pi/tools`, {
       method: "POST",
